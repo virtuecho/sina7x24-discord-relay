@@ -2,8 +2,30 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "sina7x24-discord-relay",
   "main": "src/index.js",
-  "compatibility_date": "2026-03-29",
+  "compatibility_date": "2025-03-01",
+  "vars": {
+    "SINA_ZHIBO_ID": "152",
+    "SINA_PAGE_SIZE": "100",
+    "MAX_PAGES_PER_RUN": "3",
+    "DISCORD_USERNAME": "新浪财经7x24",
+    "ALLOW_UNAUTHENTICATED_ADMIN": "false"
+  },
   "observability": {
     "enabled": true
   }
+  // Add your D1 binding after running:
+  // npx wrangler d1 create sina7x24-discord-relay
+  //
+  // "d1_databases": [
+  //   {
+  //     "binding": "DB",
+  //     "database_name": "sina7x24-discord-relay",
+  //     "database_id": "<your-d1-database-id>"
+  //   }
+  // ],
+  //
+  // Enable scheduled polling after secrets and D1 are configured:
+  // "triggers": {
+  //   "crons": ["*/1 * * * *"]
+  // }
 }
