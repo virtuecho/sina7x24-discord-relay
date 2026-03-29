@@ -40,7 +40,6 @@ function buildRelayMessage(item) {
   const body = sourceParts.body.trim();
   const source = sourceParts.source.trim();
   const tagNames = getTagNames(item);
-  const docUrl = getDocUrl(item);
   const focus = isFocusItem(item);
   const bodyText = body || (!title && originalText ? originalText : '');
   const lines = ['\u200b', '------------------------------'];
