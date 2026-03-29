@@ -1,5 +1,6 @@
 const LAST_PROCESSED_ITEM_ID_KEY = 'last_processed_item_id';
 const LAST_SEEN_FEED_ITEM_ID_KEY = 'last_seen_feed_item_id';
+const MAX_SQL_VARIABLES_PER_QUERY = 100;
 
 function getQueryResults(result) {
   return Array.isArray(result?.results) ? result.results : [];
@@ -20,6 +21,16 @@ async function execute(db, sql, bindings = []) {
 
 function nowIsoString() {
   return new Date().toISOString();
+}
+
+function chunkArray(values, chunkSize) {
+  const chunks = [];
+
+  for (let index = 0; index < values.length; index += chunkSize) {
+    chunks.push(values.slice(index, index + chunkSize));
+  }
+
+  return chunks;
 }
 
 export function createRelayStore(db) {
@@ -124,21 +135,30 @@ export function createRelayStore(db) {
       return [];
     }
 
-    const placeholders = ids.map(() => '?').join(', ');
-    return queryAll(
-      db,
-      `
-        SELECT
-          item_id,
-          discord_message_id,
-          discord_channel_id,
-          last_content_hash,
-          first_seen_at
-        FROM relay_items
-        WHERE item_id IN (${placeholders})
-      `,
-      ids
-    );
+    const results = [];
+    const idChunks = chunkArray(ids, MAX_SQL_VARIABLES_PER_QUERY);
+
+    for (const chunk of idChunks) {
+      const placeholders = chunk.map(() => '?').join(', ');
+      const rows = await queryAll(
+        db,
+        `
+          SELECT
+            item_id,
+            discord_message_id,
+            discord_channel_id,
+            last_content_hash,
+            first_seen_at
+          FROM relay_items
+          WHERE item_id IN (${placeholders})
+        `,
+        chunk
+      );
+
+      results.push(...rows);
+    }
+
+    return results;
   }
 
   async function upsertRelayItem(record) {
