@@ -6,7 +6,6 @@ import {
   extractHeadlineParts,
   extractTrailingSource,
   formatApiTime,
-  getDocUrl,
   getNumericItemId,
   getTagNames,
   isFocusItem,
@@ -66,31 +65,13 @@ function buildRelayMessage(item) {
 
   lines.push(`-# ${metadataParts.join(' | ')}`);
 
-  if (docUrl) {
-    lines.push(`-# 原文: ${docUrl}`);
-  }
-
   return truncateText(lines.join('\n'), 2000);
 }
 
-function buildHeadline(item) {
-  const originalText = typeof item?.rich_text === 'string' ? item.rich_text.trim() : '';
-  const headlineParts = extractHeadlineParts(originalText);
-  const sourceParts = extractTrailingSource(headlineParts.body || originalText);
-  const title = headlineParts.title.trim();
-  const body = sourceParts.body.trim();
-
-  return title || truncateText(body || originalText || `Item ${item?.id || ''}`, 120);
-}
-
-function buildSource(item) {
-  const originalText = typeof item?.rich_text === 'string' ? item.rich_text.trim() : '';
-  const headlineParts = extractHeadlineParts(originalText);
-  const sourceParts = extractTrailingSource(headlineParts.body || originalText);
-  return sourceParts.source.trim();
-}
-
 function createRunSummary({
+  runId,
+  startedAt,
+  finishedAt,
   triggerType,
   outcome,
   fetchedCount,
@@ -99,18 +80,29 @@ function createRunSummary({
   skippedCount,
   latestSeenId,
   lastProcessedId,
-  seeded = false
+  seeded = false,
+  errorMessage = ''
 }) {
   return {
+    run_id: runId,
+    started_at: startedAt,
+    finished_at: finishedAt,
     triggerType,
+    trigger_type: triggerType,
     outcome,
     fetchedCount,
+    fetched_count: fetchedCount,
     createdCount,
+    created_count: createdCount,
     updatedCount,
+    updated_count: updatedCount,
     skippedCount,
+    skipped_count: skippedCount,
     latestSeenId,
     lastProcessedId,
-    seeded
+    seeded,
+    errorMessage,
+    error_message: errorMessage
   };
 }
 
@@ -137,19 +129,8 @@ async function relayNewItem(item, existingRecord, config, store) {
 
   await store.upsertRelayItem({
     itemId: Number(item.id),
-    zhiboId: Number(item.zhibo_id || config.zhiboId),
-    createTime: String(item.create_time || ''),
-    updateTime: String(item.update_time || item.create_time || ''),
-    headline: buildHeadline(item),
-    source: buildSource(item),
-    tagNames: getTagNames(item).join(' / '),
-    docUrl: getDocUrl(item),
     discordMessageId: result.messageId,
-    discordChannelId: result.channelId,
     lastContentHash: contentHash,
-    relayStatus: 'created',
-    firstSeenAt: existingRecord?.first_seen_at || sentAt,
-    lastSeenAt: sentAt,
     lastRelayedAt: sentAt
   });
 }
@@ -171,23 +152,18 @@ async function relayUpdatedItem(item, existingRecord, config, store) {
 
   await store.upsertRelayItem({
     itemId: Number(item.id),
-    zhiboId: Number(item.zhibo_id || config.zhiboId),
-    createTime: String(item.create_time || ''),
-    updateTime: String(item.update_time || item.create_time || ''),
-    headline: buildHeadline(item),
-    source: buildSource(item),
-    tagNames: getTagNames(item).join(' / '),
-    docUrl: getDocUrl(item),
     discordMessageId: result.messageId || String(existingRecord.discord_message_id),
-    discordChannelId: result.channelId || String(existingRecord.discord_channel_id || ''),
     lastContentHash: contentHash,
-    relayStatus: 'updated',
-    firstSeenAt: String(existingRecord.first_seen_at || sentAt),
-    lastSeenAt: sentAt,
     lastRelayedAt: sentAt
   });
 
   return true;
+}
+
+function createRetentionCutoffIso(days) {
+  const cutoffDate = new Date();
+  cutoffDate.setUTCDate(cutoffDate.getUTCDate() - days);
+  return cutoffDate.toISOString();
 }
 
 export async function runRelaySync(env, config, { triggerType }) {
@@ -209,12 +185,6 @@ export async function runRelaySync(env, config, { triggerType }) {
   let latestSeenId = null;
   let lastProcessedId = null;
 
-  await store.insertRun({
-    runId,
-    startedAt,
-    triggerType
-  });
-
   try {
     const feedItems = await fetchRecentFeedItems(config);
     fetchedCount = feedItems.length;
@@ -232,6 +202,9 @@ export async function runRelaySync(env, config, { triggerType }) {
       }
 
       const summary = createRunSummary({
+        runId,
+        startedAt,
+        finishedAt: nowIsoString(),
         triggerType,
         outcome: latestSeenId == null ? 'empty' : 'seeded',
         fetchedCount,
@@ -243,15 +216,7 @@ export async function runRelaySync(env, config, { triggerType }) {
         seeded: latestSeenId != null
       });
 
-      await store.finishRun({
-        runId,
-        finishedAt: nowIsoString(),
-        outcome: summary.outcome,
-        fetchedCount,
-        createdCount,
-        updatedCount,
-        skippedCount
-      });
+      await store.setLastRunSummary(summary);
 
       return summary;
     }
@@ -298,8 +263,13 @@ export async function runRelaySync(env, config, { triggerType }) {
       lastProcessedId = cursorToPersist;
     }
 
+    await store.pruneRelayItemsOlderThan(createRetentionCutoffIso(7));
+
     const outcome = fetchedCount === 0 ? 'empty' : 'ok';
     const summary = createRunSummary({
+      runId,
+      startedAt,
+      finishedAt: nowIsoString(),
       triggerType,
       outcome,
       fetchedCount,
@@ -310,28 +280,26 @@ export async function runRelaySync(env, config, { triggerType }) {
       lastProcessedId
     });
 
-    await store.finishRun({
-      runId,
-      finishedAt: nowIsoString(),
-      outcome,
-      fetchedCount,
-      createdCount,
-      updatedCount,
-      skippedCount
-    });
+    await store.setLastRunSummary(summary);
 
     return summary;
   } catch (error) {
-    await store.finishRun({
+    const summary = createRunSummary({
       runId,
+      startedAt,
       finishedAt: nowIsoString(),
+      triggerType,
       outcome: 'error',
       fetchedCount,
       createdCount,
       updatedCount,
       skippedCount,
+      latestSeenId,
+      lastProcessedId,
       errorMessage: error instanceof Error ? error.message : String(error)
     });
+
+    await store.setLastRunSummary(summary);
 
     throw error;
   }

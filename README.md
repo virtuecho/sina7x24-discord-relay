@@ -11,7 +11,8 @@ It is the extraction of the browser-side Discord auto-relay from the main `sina7
 - Poll the Sina 7x24 feed from a scheduled Worker or a manual admin endpoint
 - Send new feed items to Discord through a secret-managed webhook
 - Update existing Discord messages when an already-relayed feed item changes
-- Persist relay cursor, run history, and item-to-message mapping in D1
+- Persist relay cursor, one latest run summary, and a minimal item-to-message mapping in D1
+- Prune relay item mappings older than 7 days
 - Expose admin endpoints for status inspection and manual runs
 - Seed the relay cursor on first run instead of flooding Discord with backlog history
 
@@ -22,9 +23,10 @@ It is the extraction of the browser-side Discord auto-relay from the main `sina7
 - `src/http.js` — JSON responses, auth checks, and timeout helpers
 - `src/sina.js` — Sina feed fetching and pagination
 - `src/discord.js` — Discord webhook validation and delivery
-- `src/store.js` — D1 persistence for cursor, runs, and relayed items
+- `src/store.js` — D1 persistence for cursor, the latest run summary, and minimal relayed-item state
 - `src/relay.js` — end-to-end relay orchestration
-- `migrations/0001_initial.sql` — initial D1 schema
+- `migrations/0001_initial.sql` — initial D1 schema for fresh installs
+- `migrations/0002_compact_relay_state.sql` — upgrade migration for existing deployments
 - `wrangler.jsonc` — Wrangler configuration template
 - `ARCHITECTURE.md` — system design and data-flow notes
 
@@ -75,6 +77,12 @@ Apply the same schema remotely:
 npx wrangler d1 execute sina7x24-discord-relay --remote --file=./migrations/0001_initial.sql
 ```
 
+If you are upgrading an existing deployment from the earlier schema, run:
+
+```bash
+npx wrangler d1 execute sina7x24-discord-relay --remote --file=./migrations/0002_compact_relay_state.sql
+```
+
 ## Secrets And Vars
 
 Set the required secrets:
@@ -107,6 +115,8 @@ Use `Authorization: Bearer <ADMIN_API_TOKEN>` for admin endpoints unless you int
 ## First Run Behavior
 
 The first successful relay run records the newest feed item ID as the cursor and does not backfill old messages to Discord. That keeps a fresh deployment from flooding the channel with history.
+
+The Worker also stores only the latest run summary and a compact relay item mapping, and it deletes `relay_items` records older than 7 days.
 
 ## Related Docs
 

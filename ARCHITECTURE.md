@@ -8,7 +8,7 @@ The main boundaries are:
 
 - the Worker owns scheduling, secrets, state, and Discord delivery
 - Sina remains the upstream feed source
-- D1 stores relay cursor, run history, and item-to-message mapping
+- D1 stores relay cursor, one latest run summary, and a minimal item-to-message mapping
 - the browser is no longer required for automatic relay
 
 ## System Overview
@@ -59,20 +59,18 @@ sequenceDiagram
   Sina-->>Worker: feed items
   Worker->>Discord: create new messages
   Worker->>Discord: patch changed messages
-  Worker->>D1: persist cursor, runs, and message mapping
+  Worker->>D1: persist cursor, latest run summary, and message mapping
   Worker-->>Trigger: summary / completion
 ```
 
 ## D1 Schema
 
-The Worker uses three tables:
+The Worker uses two data shapes in D1:
 
 - `relay_state`
-  Key-value state such as the last processed Sina item ID.
-- `relay_runs`
-  One record per relay execution with trigger type, counters, and errors.
+  Key-value state such as the last processed Sina item ID and the latest run summary.
 - `relay_items`
-  The durable mapping from Sina `item_id` to Discord `message_id`, plus the last sent content hash.
+  A compact mapping from Sina `item_id` to Discord `message_id`, plus the last sent content hash and relay timestamp.
 
 ## Relay Rules
 
@@ -83,13 +81,15 @@ The current relay rules are:
 - create Discord messages for items newer than the stored cursor
 - patch previously relayed Discord messages if the upstream content hash changes
 - persist the highest successfully relayed item ID as the new cursor
+- keep only one latest run summary in `relay_state`
+- delete `relay_items` rows older than 7 days
 
 ## Public And Admin Surface
 
 - `GET /healthz`
   Public health response.
 - `GET /api/status`
-  Admin-only snapshot of runtime config and D1 state.
+  Admin-only snapshot of runtime config, the latest run summary, and recent compact relay mappings.
 - `POST /api/run`
   Admin-only manual relay trigger.
 
@@ -100,9 +100,9 @@ Admin routes use bearer-token auth unless local unauthenticated admin mode is ex
 This repository uses D1 instead of browser memory because the relay needs durable state:
 
 - the latest processed feed cursor
-- the Discord message ID for each relayed Sina item
-- the last content hash used to decide whether an update needs a Discord patch
-- a run history that survives browser refreshes and machine restarts
+- the latest run summary for operational visibility
+- the Discord message ID for recently relayed Sina items
+- the last content hash used to decide whether an update needs a Discord patch during the retention window
 
 ## Relationship To The Main Viewer Repo
 

@@ -1,5 +1,6 @@
 const LAST_PROCESSED_ITEM_ID_KEY = 'last_processed_item_id';
 const LAST_SEEN_FEED_ITEM_ID_KEY = 'last_seen_feed_item_id';
+const LAST_RUN_SUMMARY_KEY = 'last_run_summary';
 const MAX_SQL_VARIABLES_PER_QUERY = 100;
 
 function getQueryResults(result) {
@@ -58,6 +59,23 @@ export function createRelayStore(db) {
     );
   }
 
+  async function getJsonState(key) {
+    const state = await getState(key);
+    if (!state?.value) {
+      return null;
+    }
+
+    try {
+      return JSON.parse(state.value);
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  async function setJsonState(key, value) {
+    await setState(key, JSON.stringify(value));
+  }
+
   async function getLastProcessedItemId() {
     const state = await getState(LAST_PROCESSED_ITEM_ID_KEY);
     const parsed = Number(state?.value);
@@ -78,55 +96,12 @@ export function createRelayStore(db) {
     await setState(LAST_SEEN_FEED_ITEM_ID_KEY, itemId);
   }
 
-  async function insertRun({ runId, startedAt, triggerType }) {
-    await execute(
-      db,
-      `
-        INSERT INTO relay_runs (
-          run_id,
-          started_at,
-          trigger_type,
-          outcome
-        ) VALUES (?, ?, ?, ?)
-      `,
-      [runId, startedAt, triggerType, 'running']
-    );
+  async function getLastRunSummary() {
+    return getJsonState(LAST_RUN_SUMMARY_KEY);
   }
 
-  async function finishRun({
-    runId,
-    finishedAt,
-    outcome,
-    fetchedCount,
-    createdCount,
-    updatedCount,
-    skippedCount,
-    errorMessage = ''
-  }) {
-    await execute(
-      db,
-      `
-        UPDATE relay_runs
-        SET finished_at = ?,
-            outcome = ?,
-            fetched_count = ?,
-            created_count = ?,
-            updated_count = ?,
-            skipped_count = ?,
-            error_message = ?
-        WHERE run_id = ?
-      `,
-      [
-        finishedAt,
-        outcome,
-        fetchedCount,
-        createdCount,
-        updatedCount,
-        skippedCount,
-        errorMessage,
-        runId
-      ]
-    );
+  async function setLastRunSummary(summary) {
+    await setJsonState(LAST_RUN_SUMMARY_KEY, summary);
   }
 
   async function getRelayRecordsByItemIds(itemIds) {
@@ -146,9 +121,8 @@ export function createRelayStore(db) {
           SELECT
             item_id,
             discord_message_id,
-            discord_channel_id,
             last_content_hash,
-            first_seen_at
+            last_relayed_at
           FROM relay_items
           WHERE item_id IN (${placeholders})
         `,
@@ -167,92 +141,46 @@ export function createRelayStore(db) {
       `
         INSERT INTO relay_items (
           item_id,
-          zhibo_id,
-          create_time,
-          update_time,
-          headline,
-          source,
-          tag_names,
-          doc_url,
           discord_message_id,
-          discord_channel_id,
           last_content_hash,
-          relay_status,
-          first_seen_at,
-          last_seen_at,
           last_relayed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?)
         ON CONFLICT(item_id) DO UPDATE SET
-          zhibo_id = excluded.zhibo_id,
-          create_time = excluded.create_time,
-          update_time = excluded.update_time,
-          headline = excluded.headline,
-          source = excluded.source,
-          tag_names = excluded.tag_names,
-          doc_url = excluded.doc_url,
           discord_message_id = excluded.discord_message_id,
-          discord_channel_id = excluded.discord_channel_id,
           last_content_hash = excluded.last_content_hash,
-          relay_status = excluded.relay_status,
-          last_seen_at = excluded.last_seen_at,
           last_relayed_at = excluded.last_relayed_at
       `,
       [
         record.itemId,
-        record.zhiboId,
-        record.createTime,
-        record.updateTime,
-        record.headline,
-        record.source,
-        record.tagNames,
-        record.docUrl,
         record.discordMessageId,
-        record.discordChannelId,
         record.lastContentHash,
-        record.relayStatus,
-        record.firstSeenAt,
-        record.lastSeenAt,
         record.lastRelayedAt
       ]
     );
+  }
+
+  async function pruneRelayItemsOlderThan(cutoffIsoString) {
+    const result = await execute(
+      db,
+      'DELETE FROM relay_items WHERE last_relayed_at < ?',
+      [cutoffIsoString]
+    );
+
+    return Number(result?.meta?.changes || 0);
   }
 
   async function getStatusSnapshot() {
     const [lastProcessedItemId, lastSeenFeedItemId, lastRun, recentItems] = await Promise.all([
       getLastProcessedItemId(),
       getLastSeenFeedItemId(),
-      queryFirst(
-        db,
-        `
-          SELECT
-            run_id,
-            started_at,
-            finished_at,
-            trigger_type,
-            outcome,
-            fetched_count,
-            created_count,
-            updated_count,
-            skipped_count,
-            error_message
-          FROM relay_runs
-          ORDER BY started_at DESC
-          LIMIT 1
-        `
-      ),
+      getLastRunSummary(),
       queryAll(
         db,
         `
           SELECT
             item_id,
-            create_time,
-            update_time,
-            headline,
-            source,
-            tag_names,
-            doc_url,
             discord_message_id,
-            relay_status,
+            last_content_hash,
             last_relayed_at
           FROM relay_items
           ORDER BY last_relayed_at DESC
@@ -276,10 +204,11 @@ export function createRelayStore(db) {
     setLastProcessedItemId,
     getLastSeenFeedItemId,
     setLastSeenFeedItemId,
-    insertRun,
-    finishRun,
+    getLastRunSummary,
+    setLastRunSummary,
     getRelayRecordsByItemIds,
     upsertRelayItem,
+    pruneRelayItemsOlderThan,
     getStatusSnapshot
   };
 }
