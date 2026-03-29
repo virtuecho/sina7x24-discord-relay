@@ -116,7 +116,7 @@ Use `Authorization: Bearer <ADMIN_API_TOKEN>` for admin endpoints unless you int
 
 The first successful relay run records the newest feed item ID as the cursor and does not backfill old messages to Discord. That keeps a fresh deployment from flooding the channel with history.
 
-The Worker also stores only the latest run summary and a compact relay item mapping, and it deletes `relay_items` records older than 7 days.
+The Worker stores only the latest run summary and a compact relay item mapping, and it deletes `relay_items` records older than 7 days.
 
 ## Related Docs
 
