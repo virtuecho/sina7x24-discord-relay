@@ -97,7 +97,7 @@ npx wrangler secret put ADMIN_API_TOKEN
 `wrangler.jsonc` 里已经带了这些非敏感默认值：
 
 - `SINA_ZHIBO_ID=152`
-- `SINA_PAGE_SIZE=100`
+- `SINA_PAGE_SIZE=30`
 - `MAX_PAGES_PER_RUN=3`
 - `DISCORD_USERNAME=新浪财经7x24`
 - `ALLOW_UNAUTHENTICATED_ADMIN=false`
