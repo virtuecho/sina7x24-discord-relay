@@ -8,7 +8,7 @@ The main boundaries are:
 
 - the Worker owns scheduling, secrets, state, and Discord delivery
 - Sina remains the upstream feed source
-- D1 stores relay cursor, one latest run summary, and a minimal item-to-message mapping
+- D1 stores relay cursor, one latest run summary, a run lock, and relay memory used for deduplication
 - the browser is no longer required for automatic relay
 
 ## System Overview
@@ -54,12 +54,12 @@ sequenceDiagram
   participant Discord
 
   Trigger->>Worker: start relay run
-  Worker->>D1: read cursor + existing relay records
+  Worker->>D1: acquire run lock + read cursor + relay memory
   Worker->>Sina: fetch latest feed pages
   Sina-->>Worker: feed items
   Worker->>Discord: create new messages
   Worker->>Discord: patch changed messages
-  Worker->>D1: persist cursor, latest run summary, and message mapping
+  Worker->>D1: persist cursor, latest run summary, and refreshed relay memory
   Worker-->>Trigger: summary / completion
 ```
 
@@ -68,28 +68,32 @@ sequenceDiagram
 The Worker uses two data shapes in D1:
 
 - `relay_state`
-  Key-value state such as the last processed Sina item ID and the latest run summary.
+  Key-value state such as the last processed Sina item ID, the latest run summary, and the active run lock.
 - `relay_items`
-  A compact mapping from Sina `item_id` to Discord `message_id`, plus the last sent content hash and relay timestamp.
+  Relay memory keyed by Sina `item_id`, including the Discord message mapping, content fingerprint, duplicate linkage, and seen/relayed timestamps.
 
 ## Relay Rules
 
 The current relay rules are:
 
 - fetch a bounded number of recent Sina feed pages each run
+- add bounded jitter before scheduled runs and slight per-request randomness so polling does not look perfectly periodic
 - on the very first successful run, seed the cursor to the latest item and skip backlog delivery
+- acquire a D1-backed run lock so overlapping cron/manual executions cannot relay the same fresh item twice
 - create Discord messages for items newer than the stored cursor
+- suppress duplicate relays when a newer item carries the same normalized content fingerprint as an already-known item
 - patch previously relayed Discord messages if the upstream content hash changes
+- keep relay memory fresh by updating `last_seen_at` even when no Discord write is needed
 - persist the highest successfully relayed item ID as the new cursor
 - keep only one latest run summary in `relay_state`
-- delete `relay_items` rows older than 7 days
+- delete `relay_items` rows that have not been seen again for 7 days
 
 ## Public And Admin Surface
 
 - `GET /healthz`
   Public health response.
 - `GET /api/status`
-  Admin-only snapshot of runtime config, the latest run summary, and recent compact relay mappings.
+  Admin-only snapshot of runtime config, the latest run summary, the active lock, and recent relay memory.
 - `POST /api/run`
   Admin-only manual relay trigger.
 
@@ -101,8 +105,9 @@ This repository uses D1 instead of browser memory because the relay needs durabl
 
 - the latest processed feed cursor
 - the latest run summary for operational visibility
-- the Discord message ID for recently relayed Sina items
-- the last content hash used to decide whether an update needs a Discord patch during the retention window
+- the active run lock that prevents overlapping delivery
+- the Discord message ID for recently seen Sina items
+- the content fingerprint and last content hash used to decide whether an update or duplicate suppression is needed during the retention window
 
 ## Relationship To The Main Viewer Repo
 

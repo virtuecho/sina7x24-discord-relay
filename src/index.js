@@ -9,6 +9,7 @@ import {
 } from './http.js';
 import { runRelaySync } from './relay.js';
 import { createRelayStore } from './store.js';
+import { randomInteger, sleep } from './utils.js';
 
 function createPublicStatus(config, env) {
   return {
@@ -21,7 +22,12 @@ function createPublicStatus(config, env) {
       allowUnauthenticatedAdmin: config.allowUnauthenticatedAdmin,
       zhiboId: config.zhiboId,
       pageSize: config.pageSize,
-      maxPagesPerRun: config.maxPagesPerRun
+      pageSizeJitter: config.pageSizeJitter,
+      maxPagesPerRun: config.maxPagesPerRun,
+      sinaRequestDelayMaxMs: config.sinaRequestDelayMaxMs,
+      scheduleJitterMaxMs: config.scheduleJitterMaxMs,
+      runLockTtlMs: config.runLockTtlMs,
+      relayItemRetentionDays: config.relayItemRetentionDays
     }
   };
 }
@@ -106,6 +112,10 @@ export default {
     ctx.waitUntil(
       (async () => {
         try {
+          if (config.scheduleJitterMaxMs > 0) {
+            await sleep(randomInteger(0, config.scheduleJitterMaxMs));
+          }
+
           ensureRelayRuntimeReady(env, config);
           await runRelaySync(env, config, {
             triggerType: `cron:${controller.cron || 'scheduled'}`

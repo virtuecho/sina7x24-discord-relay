@@ -1,6 +1,7 @@
 const LAST_PROCESSED_ITEM_ID_KEY = 'last_processed_item_id';
 const LAST_SEEN_FEED_ITEM_ID_KEY = 'last_seen_feed_item_id';
 const LAST_RUN_SUMMARY_KEY = 'last_run_summary';
+const ACTIVE_RUN_LOCK_KEY = 'active_run_lock';
 const MAX_SQL_VARIABLES_PER_QUERY = 100;
 
 function getQueryResults(result) {
@@ -32,6 +33,10 @@ function chunkArray(values, chunkSize) {
   }
 
   return chunks;
+}
+
+function getAffectedRows(result) {
+  return Number(result?.meta?.changes || 0);
 }
 
 export function createRelayStore(db) {
@@ -104,6 +109,50 @@ export function createRelayStore(db) {
     await setJsonState(LAST_RUN_SUMMARY_KEY, summary);
   }
 
+  async function getActiveRunLock() {
+    const state = await getState(ACTIVE_RUN_LOCK_KEY);
+    if (!state?.value) {
+      return null;
+    }
+
+    return {
+      runId: state.value,
+      acquiredAt: state.updated_at
+    };
+  }
+
+  async function acquireRunLock(runId, ttlMs) {
+    const acquiredAt = nowIsoString();
+    const staleBefore = new Date(Date.now() - ttlMs).toISOString();
+    const result = await execute(
+      db,
+      `
+        INSERT INTO relay_state (key, value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET
+          value = excluded.value,
+          updated_at = excluded.updated_at
+        WHERE relay_state.updated_at < ?
+      `,
+      [ACTIVE_RUN_LOCK_KEY, runId, acquiredAt, staleBefore]
+    );
+
+    return {
+      acquired: getAffectedRows(result) > 0,
+      acquiredAt
+    };
+  }
+
+  async function releaseRunLock(runId) {
+    const result = await execute(
+      db,
+      'DELETE FROM relay_state WHERE key = ? AND value = ?',
+      [ACTIVE_RUN_LOCK_KEY, runId]
+    );
+
+    return getAffectedRows(result) > 0;
+  }
+
   async function getRelayRecordsByItemIds(itemIds) {
     const ids = [...new Set(itemIds.map(value => Number(value)).filter(Number.isFinite))];
     if (ids.length === 0) {
@@ -120,11 +169,68 @@ export function createRelayStore(db) {
         `
           SELECT
             item_id,
+            zhibo_id,
+            create_time,
+            update_time,
+            headline,
+            source,
+            tag_names,
+            doc_url,
+            normalized_content,
+            content_fingerprint,
             discord_message_id,
             last_content_hash,
+            relay_status,
+            duplicate_of_item_id,
+            first_seen_at,
+            last_seen_at,
             last_relayed_at
           FROM relay_items
           WHERE item_id IN (${placeholders})
+        `,
+        chunk
+      );
+
+      results.push(...rows);
+    }
+
+    return results;
+  }
+
+  async function getRelayRecordsByContentFingerprints(fingerprints) {
+    const values = [...new Set(fingerprints.map(value => String(value || '').trim()).filter(Boolean))];
+    if (values.length === 0) {
+      return [];
+    }
+
+    const results = [];
+    const fingerprintChunks = chunkArray(values, MAX_SQL_VARIABLES_PER_QUERY);
+
+    for (const chunk of fingerprintChunks) {
+      const placeholders = chunk.map(() => '?').join(', ');
+      const rows = await queryAll(
+        db,
+        `
+          SELECT
+            item_id,
+            zhibo_id,
+            create_time,
+            update_time,
+            headline,
+            source,
+            tag_names,
+            doc_url,
+            normalized_content,
+            content_fingerprint,
+            discord_message_id,
+            last_content_hash,
+            relay_status,
+            duplicate_of_item_id,
+            first_seen_at,
+            last_seen_at,
+            last_relayed_at
+          FROM relay_items
+          WHERE content_fingerprint IN (${placeholders})
         `,
         chunk
       );
@@ -141,49 +247,96 @@ export function createRelayStore(db) {
       `
         INSERT INTO relay_items (
           item_id,
+          zhibo_id,
+          create_time,
+          update_time,
+          headline,
+          source,
+          tag_names,
+          doc_url,
+          normalized_content,
+          content_fingerprint,
           discord_message_id,
           last_content_hash,
+          relay_status,
+          duplicate_of_item_id,
+          first_seen_at,
+          last_seen_at,
           last_relayed_at
-        ) VALUES (?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(item_id) DO UPDATE SET
+          zhibo_id = excluded.zhibo_id,
+          create_time = excluded.create_time,
+          update_time = excluded.update_time,
+          headline = excluded.headline,
+          source = excluded.source,
+          tag_names = excluded.tag_names,
+          doc_url = excluded.doc_url,
+          normalized_content = excluded.normalized_content,
+          content_fingerprint = excluded.content_fingerprint,
           discord_message_id = excluded.discord_message_id,
           last_content_hash = excluded.last_content_hash,
+          relay_status = excluded.relay_status,
+          duplicate_of_item_id = excluded.duplicate_of_item_id,
+          first_seen_at = excluded.first_seen_at,
+          last_seen_at = excluded.last_seen_at,
           last_relayed_at = excluded.last_relayed_at
       `,
       [
         record.itemId,
+        record.zhiboId,
+        record.createTime,
+        record.updateTime,
+        record.headline,
+        record.source,
+        record.tagNames,
+        record.docUrl,
+        record.normalizedContent,
+        record.contentFingerprint,
         record.discordMessageId,
         record.lastContentHash,
+        record.relayStatus,
+        record.duplicateOfItemId ?? null,
+        record.firstSeenAt,
+        record.lastSeenAt,
         record.lastRelayedAt
       ]
     );
   }
 
-  async function pruneRelayItemsOlderThan(cutoffIsoString) {
+  async function pruneRelayItemsLastSeenBefore(cutoffIsoString) {
     const result = await execute(
       db,
-      'DELETE FROM relay_items WHERE last_relayed_at < ?',
+      'DELETE FROM relay_items WHERE last_seen_at < ?',
       [cutoffIsoString]
     );
 
-    return Number(result?.meta?.changes || 0);
+    return getAffectedRows(result);
   }
 
   async function getStatusSnapshot() {
-    const [lastProcessedItemId, lastSeenFeedItemId, lastRun, recentItems] = await Promise.all([
+    const [lastProcessedItemId, lastSeenFeedItemId, lastRun, activeLock, recentItems] = await Promise.all([
       getLastProcessedItemId(),
       getLastSeenFeedItemId(),
       getLastRunSummary(),
+      getActiveRunLock(),
       queryAll(
         db,
         `
           SELECT
             item_id,
+            create_time,
+            update_time,
+            headline,
+            source,
+            relay_status,
+            duplicate_of_item_id,
             discord_message_id,
-            last_content_hash,
+            content_fingerprint,
+            last_seen_at,
             last_relayed_at
           FROM relay_items
-          ORDER BY last_relayed_at DESC
+          ORDER BY last_seen_at DESC
           LIMIT 20
         `
       )
@@ -194,6 +347,7 @@ export function createRelayStore(db) {
         lastProcessedItemId,
         lastSeenFeedItemId
       },
+      activeLock,
       lastRun,
       recentItems
     };
@@ -206,9 +360,13 @@ export function createRelayStore(db) {
     setLastSeenFeedItemId,
     getLastRunSummary,
     setLastRunSummary,
+    getActiveRunLock,
+    acquireRunLock,
+    releaseRunLock,
     getRelayRecordsByItemIds,
+    getRelayRecordsByContentFingerprints,
     upsertRelayItem,
-    pruneRelayItemsOlderThan,
+    pruneRelayItemsLastSeenBefore,
     getStatusSnapshot
   };
 }

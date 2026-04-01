@@ -6,9 +6,11 @@ import {
   extractHeadlineParts,
   extractTrailingSource,
   formatApiTime,
+  getDocUrl,
   getNumericItemId,
   getTagNames,
   isFocusItem,
+  normalizeContentText,
   sha256Hex,
   truncateText
 } from './utils.js';
@@ -67,6 +69,23 @@ function buildRelayMessage(item) {
   return truncateText(lines.join('\n'), 2000);
 }
 
+function buildHeadline(item) {
+  const originalText = typeof item?.rich_text === 'string' ? item.rich_text.trim() : '';
+  const headlineParts = extractHeadlineParts(originalText);
+  const sourceParts = extractTrailingSource(headlineParts.body || originalText);
+  const title = headlineParts.title.trim();
+  const body = sourceParts.body.trim();
+
+  return title || truncateText(body || originalText || `Item ${item?.id || ''}`, 120);
+}
+
+function buildSource(item) {
+  const originalText = typeof item?.rich_text === 'string' ? item.rich_text.trim() : '';
+  const headlineParts = extractHeadlineParts(originalText);
+  const sourceParts = extractTrailingSource(headlineParts.body || originalText);
+  return sourceParts.source.trim();
+}
+
 function createRunSummary({
   runId,
   startedAt,
@@ -77,6 +96,8 @@ function createRunSummary({
   createdCount,
   updatedCount,
   skippedCount,
+  deduplicatedCount,
+  prunedCount,
   latestSeenId,
   lastProcessedId,
   seeded = false,
@@ -97,6 +118,10 @@ function createRunSummary({
     updated_count: updatedCount,
     skippedCount,
     skipped_count: skippedCount,
+    deduplicatedCount,
+    deduplicated_count: deduplicatedCount,
+    prunedCount,
+    pruned_count: prunedCount,
     latestSeenId,
     lastProcessedId,
     seeded,
@@ -116,53 +141,264 @@ function normalizeExistingMap(records) {
   return map;
 }
 
-async function relayNewItem(item, existingRecord, config, store) {
+function shouldReplaceFingerprintRecord(current, candidate) {
+  const currentCanonical = current?.relay_status !== 'deduped';
+  const candidateCanonical = candidate?.relay_status !== 'deduped';
+
+  if (currentCanonical !== candidateCanonical) {
+    return candidateCanonical;
+  }
+
+  const currentSeenAt = String(current?.last_seen_at || current?.first_seen_at || '');
+  const candidateSeenAt = String(candidate?.last_seen_at || candidate?.first_seen_at || '');
+  return candidateSeenAt > currentSeenAt;
+}
+
+function normalizeFingerprintMap(records) {
+  const map = new Map();
+
+  records.forEach(record => {
+    const key = String(record?.content_fingerprint || '').trim();
+    if (!key) {
+      return;
+    }
+
+    const current = map.get(key);
+    if (!current || shouldReplaceFingerprintRecord(current, record)) {
+      map.set(key, record);
+    }
+  });
+
+  return map;
+}
+
+function getCanonicalItemId(record) {
+  const duplicateOfItemId = Number(record?.duplicate_of_item_id);
+  if (Number.isFinite(duplicateOfItemId)) {
+    return duplicateOfItemId;
+  }
+
+  const itemId = Number(record?.item_id);
+  return Number.isFinite(itemId) ? itemId : null;
+}
+
+async function buildPreparedItem(item, config) {
+  const normalizedContent = normalizeContentText(typeof item?.rich_text === 'string' ? item.rich_text : '');
   const content = buildRelayMessage(item);
-  const contentHash = await sha256Hex(content);
+  const [contentHash, contentFingerprint] = await Promise.all([
+    sha256Hex(content),
+    sha256Hex(normalizedContent || content)
+  ]);
+
+  return {
+    itemId: Number(item.id),
+    zhiboId: Number(item.zhibo_id || config.zhiboId),
+    createTime: String(item.create_time || ''),
+    updateTime: String(item.update_time || item.create_time || ''),
+    headline: buildHeadline(item),
+    source: buildSource(item),
+    tagNames: getTagNames(item).join(' / '),
+    docUrl: getDocUrl(item),
+    normalizedContent,
+    content,
+    contentHash,
+    contentFingerprint
+  };
+}
+
+function createRelayItemRecord(prepared, existingRecord, overrides = {}) {
+  return {
+    itemId: prepared.itemId,
+    zhiboId: prepared.zhiboId,
+    createTime: prepared.createTime,
+    updateTime: prepared.updateTime,
+    headline: prepared.headline,
+    source: prepared.source,
+    tagNames: prepared.tagNames,
+    docUrl: prepared.docUrl,
+    normalizedContent: prepared.normalizedContent,
+    contentFingerprint: prepared.contentFingerprint,
+    discordMessageId: String(
+      overrides.discordMessageId ?? existingRecord?.discord_message_id ?? ''
+    ),
+    lastContentHash: overrides.lastContentHash ?? prepared.contentHash,
+    relayStatus: overrides.relayStatus ?? existingRecord?.relay_status ?? 'created',
+    duplicateOfItemId: overrides.duplicateOfItemId ?? existingRecord?.duplicate_of_item_id ?? null,
+    firstSeenAt: overrides.firstSeenAt ?? String(existingRecord?.first_seen_at || nowIsoString()),
+    lastSeenAt: overrides.lastSeenAt ?? nowIsoString(),
+    lastRelayedAt: overrides.lastRelayedAt ?? String(existingRecord?.last_relayed_at || nowIsoString())
+  };
+}
+
+function toStoredRelayRecord(record) {
+  return {
+    item_id: record.itemId,
+    zhibo_id: record.zhiboId,
+    create_time: record.createTime,
+    update_time: record.updateTime,
+    headline: record.headline,
+    source: record.source,
+    tag_names: record.tagNames,
+    doc_url: record.docUrl,
+    normalized_content: record.normalizedContent,
+    content_fingerprint: record.contentFingerprint,
+    discord_message_id: record.discordMessageId,
+    last_content_hash: record.lastContentHash,
+    relay_status: record.relayStatus,
+    duplicate_of_item_id: record.duplicateOfItemId,
+    first_seen_at: record.firstSeenAt,
+    last_seen_at: record.lastSeenAt,
+    last_relayed_at: record.lastRelayedAt
+  };
+}
+
+function findDuplicateRecord(fingerprintMap, prepared) {
+  const record = fingerprintMap.get(prepared.contentFingerprint);
+  if (!record) {
+    return null;
+  }
+
+  const itemId = Number(record?.item_id);
+  if (!Number.isFinite(itemId) || itemId === prepared.itemId) {
+    return null;
+  }
+
+  if (!record?.discord_message_id) {
+    return null;
+  }
+
+  return record;
+}
+
+async function relayNewItem(item, prepared, existingRecord, config, store) {
   const sentAt = nowIsoString();
   const result = await sendDiscordMessage({
     webhookUrl: config.discordWebhookUrl,
-    content,
+    content: prepared.content,
     username: config.discordUsername
   });
 
-  await store.upsertRelayItem({
-    itemId: Number(item.id),
+  const record = createRelayItemRecord(prepared, existingRecord, {
     discordMessageId: result.messageId,
-    lastContentHash: contentHash,
+    relayStatus: 'created',
+    duplicateOfItemId: null,
+    firstSeenAt: existingRecord?.first_seen_at || sentAt,
+    lastSeenAt: sentAt,
     lastRelayedAt: sentAt
   });
+
+  await store.upsertRelayItem(record);
+  return toStoredRelayRecord(record);
 }
 
-async function relayUpdatedItem(item, existingRecord, config, store) {
-  const content = buildRelayMessage(item);
-  const contentHash = await sha256Hex(content);
+async function markItemAsDeduplicated(prepared, existingRecord, duplicateRecord, store) {
+  const seenAt = nowIsoString();
+  const canonicalItemId = getCanonicalItemId(duplicateRecord);
+  const record = createRelayItemRecord(prepared, existingRecord, {
+    discordMessageId: String(duplicateRecord.discord_message_id),
+    relayStatus: 'deduped',
+    duplicateOfItemId: canonicalItemId,
+    firstSeenAt: existingRecord?.first_seen_at || seenAt,
+    lastSeenAt: seenAt,
+    lastRelayedAt: String(
+      existingRecord?.last_relayed_at || duplicateRecord.last_relayed_at || seenAt
+    )
+  });
 
-  if (!existingRecord?.discord_message_id || existingRecord.last_content_hash === contentHash) {
-    return false;
+  await store.upsertRelayItem(record);
+  return toStoredRelayRecord(record);
+}
+
+async function relayUpdatedItem(item, prepared, existingRecord, fingerprintMap, config, store) {
+  const seenAt = nowIsoString();
+
+  if (!existingRecord?.discord_message_id) {
+    return {
+      action: 'skipped',
+      record: existingRecord
+    };
   }
 
-  const sentAt = nowIsoString();
+  if (existingRecord.last_content_hash === prepared.contentHash) {
+    const record = createRelayItemRecord(prepared, existingRecord, {
+      relayStatus: existingRecord.relay_status || 'created',
+      duplicateOfItemId: existingRecord.duplicate_of_item_id ?? null,
+      firstSeenAt: String(existingRecord.first_seen_at || seenAt),
+      lastSeenAt: seenAt,
+      lastRelayedAt: String(existingRecord.last_relayed_at || seenAt)
+    });
+
+    await store.upsertRelayItem(record);
+
+    return {
+      action: 'skipped',
+      record: toStoredRelayRecord(record)
+    };
+  }
+
+  if (existingRecord.relay_status === 'deduped') {
+    const duplicateRecord = findDuplicateRecord(fingerprintMap, prepared);
+
+    if (duplicateRecord) {
+      const record = await markItemAsDeduplicated(prepared, existingRecord, duplicateRecord, store);
+      return {
+        action: 'skipped',
+        record
+      };
+    }
+
+    const record = await relayNewItem(item, prepared, existingRecord, config, store);
+    return {
+      action: 'created',
+      record
+    };
+  }
+
   const result = await updateDiscordMessage({
     webhookUrl: config.discordWebhookUrl,
     messageId: String(existingRecord.discord_message_id),
-    content
+    content: prepared.content
   });
 
-  await store.upsertRelayItem({
-    itemId: Number(item.id),
+  const record = createRelayItemRecord(prepared, existingRecord, {
     discordMessageId: result.messageId || String(existingRecord.discord_message_id),
-    lastContentHash: contentHash,
-    lastRelayedAt: sentAt
+    relayStatus: 'updated',
+    duplicateOfItemId: null,
+    firstSeenAt: String(existingRecord.first_seen_at || seenAt),
+    lastSeenAt: seenAt,
+    lastRelayedAt: seenAt
   });
 
-  return true;
+  await store.upsertRelayItem(record);
+
+  return {
+    action: 'updated',
+    record: toStoredRelayRecord(record)
+  };
 }
 
 function createRetentionCutoffIso(days) {
   const cutoffDate = new Date();
   cutoffDate.setUTCDate(cutoffDate.getUTCDate() - days);
   return cutoffDate.toISOString();
+}
+
+function createLockedSummary({ runId, startedAt, finishedAt, triggerType, lastProcessedId }) {
+  return createRunSummary({
+    runId,
+    startedAt,
+    finishedAt,
+    triggerType,
+    outcome: 'locked',
+    fetchedCount: 0,
+    createdCount: 0,
+    updatedCount: 0,
+    skippedCount: 0,
+    deduplicatedCount: 0,
+    prunedCount: 0,
+    latestSeenId: null,
+    lastProcessedId
+  });
 }
 
 export async function runRelaySync(env, config, { triggerType }) {
@@ -181,10 +417,27 @@ export async function runRelaySync(env, config, { triggerType }) {
   let createdCount = 0;
   let updatedCount = 0;
   let skippedCount = 0;
+  let deduplicatedCount = 0;
+  let prunedCount = 0;
   let latestSeenId = null;
   let lastProcessedId = null;
+  let lockAcquired = false;
 
   try {
+    const lockResult = await store.acquireRunLock(runId, config.runLockTtlMs);
+    lockAcquired = lockResult.acquired;
+
+    if (!lockAcquired) {
+      lastProcessedId = await store.getLastProcessedItemId();
+      return createLockedSummary({
+        runId,
+        startedAt,
+        finishedAt: nowIsoString(),
+        triggerType,
+        lastProcessedId
+      });
+    }
+
     const feedItems = await fetchRecentFeedItems(config);
     fetchedCount = feedItems.length;
     latestSeenId = feedItems.length > 0 ? getNumericItemId(feedItems[0]) : null;
@@ -210,6 +463,8 @@ export async function runRelaySync(env, config, { triggerType }) {
         createdCount,
         updatedCount,
         skippedCount,
+        deduplicatedCount,
+        prunedCount,
         latestSeenId,
         lastProcessedId: latestSeenId,
         seeded: latestSeenId != null
@@ -220,37 +475,76 @@ export async function runRelaySync(env, config, { triggerType }) {
       return summary;
     }
 
-    const existingRecords = await store.getRelayRecordsByItemIds(
-      feedItems.map(item => getNumericItemId(item)).filter(Number.isFinite)
+    const preparedEntries = await Promise.all(
+      feedItems.map(async item => ({
+        item,
+        prepared: await buildPreparedItem(item, config)
+      }))
     );
-    const existingMap = normalizeExistingMap(existingRecords);
 
-    const newItems = feedItems
-      .filter(item => {
-        const itemId = getNumericItemId(item);
-        return itemId != null && itemId > lastProcessedId;
-      })
-      .sort((left, right) => Number(left.id) - Number(right.id));
+    const existingRecords = await store.getRelayRecordsByItemIds(
+      preparedEntries.map(entry => entry.prepared.itemId).filter(Number.isFinite)
+    );
+    const fingerprintRecords = await store.getRelayRecordsByContentFingerprints(
+      preparedEntries.map(entry => entry.prepared.contentFingerprint)
+    );
+
+    const existingMap = normalizeExistingMap(existingRecords);
+    const fingerprintMap = normalizeFingerprintMap(fingerprintRecords);
+
+    const newEntries = preparedEntries
+      .filter(entry => entry.prepared.itemId > lastProcessedId)
+      .sort((left, right) => left.prepared.itemId - right.prepared.itemId);
 
     let cursorToPersist = lastProcessedId;
 
-    for (const item of newItems) {
-      const itemId = Number(item.id);
-      await relayNewItem(item, existingMap.get(itemId), config, store);
+    for (const entry of newEntries) {
+      const { item, prepared } = entry;
+      const existingRecord = existingMap.get(prepared.itemId);
+      const duplicateRecord = findDuplicateRecord(fingerprintMap, prepared);
+
+      if (duplicateRecord) {
+        const record = await markItemAsDeduplicated(prepared, existingRecord, duplicateRecord, store);
+        existingMap.set(prepared.itemId, record);
+        deduplicatedCount += 1;
+        cursorToPersist = prepared.itemId;
+        continue;
+      }
+
+      const record = await relayNewItem(item, prepared, existingRecord, config, store);
+      existingMap.set(prepared.itemId, record);
+      fingerprintMap.set(prepared.contentFingerprint, record);
       createdCount += 1;
-      cursorToPersist = itemId;
+      cursorToPersist = prepared.itemId;
     }
 
-    const existingItems = feedItems.filter(item => {
-      const itemId = getNumericItemId(item);
-      return itemId != null && itemId <= lastProcessedId && existingMap.has(itemId);
+    const existingEntries = preparedEntries.filter(entry => {
+      const itemId = entry.prepared.itemId;
+      return itemId <= lastProcessedId && existingMap.has(itemId);
     });
 
-    for (const item of existingItems) {
-      const itemId = Number(item.id);
-      const updated = await relayUpdatedItem(item, existingMap.get(itemId), config, store);
+    for (const entry of existingEntries) {
+      const { item, prepared } = entry;
+      const itemId = prepared.itemId;
+      const result = await relayUpdatedItem(
+        item,
+        prepared,
+        existingMap.get(itemId),
+        fingerprintMap,
+        config,
+        store
+      );
 
-      if (updated) {
+      if (result?.record) {
+        existingMap.set(itemId, result.record);
+        if (result.record.relay_status !== 'deduped') {
+          fingerprintMap.set(prepared.contentFingerprint, result.record);
+        }
+      }
+
+      if (result?.action === 'created') {
+        createdCount += 1;
+      } else if (result?.action === 'updated') {
         updatedCount += 1;
       } else {
         skippedCount += 1;
@@ -262,7 +556,9 @@ export async function runRelaySync(env, config, { triggerType }) {
       lastProcessedId = cursorToPersist;
     }
 
-    await store.pruneRelayItemsOlderThan(createRetentionCutoffIso(7));
+    prunedCount = await store.pruneRelayItemsLastSeenBefore(
+      createRetentionCutoffIso(config.relayItemRetentionDays)
+    );
 
     const outcome = fetchedCount === 0 ? 'empty' : 'ok';
     const summary = createRunSummary({
@@ -275,6 +571,8 @@ export async function runRelaySync(env, config, { triggerType }) {
       createdCount,
       updatedCount,
       skippedCount,
+      deduplicatedCount,
+      prunedCount,
       latestSeenId,
       lastProcessedId
     });
@@ -293,13 +591,21 @@ export async function runRelaySync(env, config, { triggerType }) {
       createdCount,
       updatedCount,
       skippedCount,
+      deduplicatedCount,
+      prunedCount,
       latestSeenId,
       lastProcessedId,
       errorMessage: error instanceof Error ? error.message : String(error)
     });
 
-    await store.setLastRunSummary(summary);
+    if (lockAcquired) {
+      await store.setLastRunSummary(summary);
+    }
 
     throw error;
+  } finally {
+    if (lockAcquired) {
+      await store.releaseRunLock(runId);
+    }
   }
 }

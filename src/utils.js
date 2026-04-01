@@ -141,6 +141,28 @@ export function truncateText(text, limit = 2000) {
   return `${text.slice(0, Math.max(0, limit - 3)).trimEnd()}...`;
 }
 
+export function normalizeContentText(text) {
+  if (typeof text !== 'string') {
+    return '';
+  }
+
+  let normalized = text;
+
+  try {
+    normalized = normalized.normalize('NFKC');
+  } catch (_error) {
+    normalized = text;
+  }
+
+  return normalized
+    .replace(/\r\n/g, '\n')
+    .replace(/\u00a0/g, ' ')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 export async function sha256Hex(text) {
   const digest = await crypto.subtle.digest(
     'SHA-256',
@@ -150,4 +172,19 @@ export async function sha256Hex(text) {
   return [...new Uint8Array(digest)]
     .map(value => value.toString(16).padStart(2, '0'))
     .join('');
+}
+
+export function randomInteger(min, max) {
+  const lower = Math.ceil(Math.min(min, max));
+  const upper = Math.floor(Math.max(min, max));
+
+  if (upper <= lower) {
+    return lower;
+  }
+
+  return lower + Math.floor(Math.random() * (upper - lower + 1));
+}
+
+export function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, Math.max(0, ms)));
 }
