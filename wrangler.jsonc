@@ -17,20 +17,15 @@
   },
   "observability": {
     "enabled": true
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "sina7x24-discord-relay",
+      "database_id": "17f375ec-7181-4805-a82d-05f59731f090"
+    }
+  ],
+  "triggers": {
+    "crons": ["*/1 * * * *"]
   }
-  // Add your D1 binding after running:
-  // npx wrangler d1 create sina7x24-discord-relay
-  //
-  // "d1_databases": [
-  //   {
-  //     "binding": "DB",
-  //     "database_name": "sina7x24-discord-relay",
-  //     "database_id": "<your-d1-database-id>"
-  //   }
-  // ],
-  //
-  // Enable scheduled polling after secrets and D1 are configured:
-  // "triggers": {
-  //   "crons": ["*/1 * * * *"]
-  // }
 }
