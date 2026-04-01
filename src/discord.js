@@ -1,6 +1,11 @@
 import { fetchWithTimeout, HttpError, isAbortError } from './http.js';
 
 const DISCORD_TIMEOUT_MS = 15000;
+const MAX_RATE_LIMIT_RETRIES = 4;
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, Math.max(0, ms)));
+}
 
 function parseWebhookUrl(rawUrl) {
   let url;
@@ -68,43 +73,61 @@ async function readDiscordResponse(upstreamResponse) {
 }
 
 async function requestDiscord(url, init) {
-  let upstreamResponse;
+  for (let attempt = 0; attempt <= MAX_RATE_LIMIT_RETRIES; attempt += 1) {
+    let upstreamResponse;
 
-  try {
-    upstreamResponse = await fetchWithTimeout(
-      url,
-      {
-        ...init,
-        headers: {
-          accept: 'application/json',
-          'content-type': 'application/json',
-          'user-agent': 'sina7x24-discord-relay/1.0',
-          ...(init.headers || {})
-        }
-      },
-      DISCORD_TIMEOUT_MS
-    );
-  } catch (error) {
-    throw new HttpError(
-      isAbortError(error) ? 504 : 502,
-      isAbortError(error) ? 'discord_webhook_timeout' : 'discord_webhook_proxy_error',
-      isAbortError(error) ? 'Discord Webhook 请求超时' : 'Discord Webhook 请求失败',
-      error instanceof Error ? error.message : String(error)
-    );
+    try {
+      upstreamResponse = await fetchWithTimeout(
+        url,
+        {
+          ...init,
+          headers: {
+            accept: 'application/json',
+            'content-type': 'application/json',
+            'user-agent': 'sina7x24-discord-relay/1.0',
+            ...(init.headers || {})
+          }
+        },
+        DISCORD_TIMEOUT_MS
+      );
+    } catch (error) {
+      throw new HttpError(
+        isAbortError(error) ? 504 : 502,
+        isAbortError(error) ? 'discord_webhook_timeout' : 'discord_webhook_proxy_error',
+        isAbortError(error) ? 'Discord Webhook 请求超时' : 'Discord Webhook 请求失败',
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+
+    const payload = await readDiscordResponse(upstreamResponse);
+
+    if (!upstreamResponse.ok) {
+      if (upstreamResponse.status === 429 && attempt < MAX_RATE_LIMIT_RETRIES) {
+        const retryAfterSeconds = Number(
+          payload?.retry_after
+          ?? upstreamResponse.headers.get('retry-after')
+          ?? upstreamResponse.headers.get('x-ratelimit-reset-after')
+        );
+        const retryAfterMs = Number.isFinite(retryAfterSeconds)
+          ? Math.max(250, Math.ceil(retryAfterSeconds * 1000))
+          : 1500;
+
+        await sleep(retryAfterMs);
+        continue;
+      }
+
+      throw new HttpError(
+        upstreamResponse.status,
+        'discord_webhook_upstream_error',
+        payload?.message || `Discord Webhook 返回 HTTP ${upstreamResponse.status}`,
+        payload
+      );
+    }
+
+    return payload && typeof payload === 'object' ? payload : {};
   }
 
-  const payload = await readDiscordResponse(upstreamResponse);
-
-  if (!upstreamResponse.ok) {
-    throw new HttpError(
-      upstreamResponse.status,
-      'discord_webhook_upstream_error',
-      payload?.message || `Discord Webhook 返回 HTTP ${upstreamResponse.status}`,
-      payload
-    );
-  }
-
-  return payload && typeof payload === 'object' ? payload : {};
+  throw new HttpError(429, 'discord_webhook_upstream_error', 'Discord Webhook 达到速率限制');
 }
 
 export async function sendDiscordMessage({ webhookUrl, content, username = '' }) {

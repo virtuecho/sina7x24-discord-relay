@@ -401,6 +401,19 @@ function createLockedSummary({ runId, startedAt, finishedAt, triggerType, lastPr
   });
 }
 
+async function advanceLastProcessedCursor(store, currentValue, nextValue) {
+  if (!Number.isFinite(nextValue)) {
+    return currentValue;
+  }
+
+  if (Number.isFinite(currentValue) && nextValue <= currentValue) {
+    return currentValue;
+  }
+
+  await store.setLastProcessedItemId(nextValue);
+  return nextValue;
+}
+
 export async function runRelaySync(env, config, { triggerType }) {
   if (!env.DB || typeof env.DB.prepare !== 'function') {
     throw new HttpError(503, 'missing_d1_binding', '未配置 D1 数据库绑定');
@@ -496,18 +509,46 @@ export async function runRelaySync(env, config, { triggerType }) {
       .filter(entry => entry.prepared.itemId > lastProcessedId)
       .sort((left, right) => left.prepared.itemId - right.prepared.itemId);
 
-    let cursorToPersist = lastProcessedId;
-
     for (const entry of newEntries) {
       const { item, prepared } = entry;
       const existingRecord = existingMap.get(prepared.itemId);
+
+      if (existingRecord?.discord_message_id) {
+        const result = await relayUpdatedItem(
+          item,
+          prepared,
+          existingRecord,
+          fingerprintMap,
+          config,
+          store
+        );
+
+        if (result?.record) {
+          existingMap.set(prepared.itemId, result.record);
+          if (result.record.relay_status !== 'deduped') {
+            fingerprintMap.set(prepared.contentFingerprint, result.record);
+          }
+        }
+
+        if (result?.action === 'created') {
+          createdCount += 1;
+        } else if (result?.action === 'updated') {
+          updatedCount += 1;
+        } else {
+          skippedCount += 1;
+        }
+
+        lastProcessedId = await advanceLastProcessedCursor(store, lastProcessedId, prepared.itemId);
+        continue;
+      }
+
       const duplicateRecord = findDuplicateRecord(fingerprintMap, prepared);
 
       if (duplicateRecord) {
         const record = await markItemAsDeduplicated(prepared, existingRecord, duplicateRecord, store);
         existingMap.set(prepared.itemId, record);
         deduplicatedCount += 1;
-        cursorToPersist = prepared.itemId;
+        lastProcessedId = await advanceLastProcessedCursor(store, lastProcessedId, prepared.itemId);
         continue;
       }
 
@@ -515,7 +556,7 @@ export async function runRelaySync(env, config, { triggerType }) {
       existingMap.set(prepared.itemId, record);
       fingerprintMap.set(prepared.contentFingerprint, record);
       createdCount += 1;
-      cursorToPersist = prepared.itemId;
+      lastProcessedId = await advanceLastProcessedCursor(store, lastProcessedId, prepared.itemId);
     }
 
     const existingEntries = preparedEntries.filter(entry => {
@@ -549,11 +590,6 @@ export async function runRelaySync(env, config, { triggerType }) {
       } else {
         skippedCount += 1;
       }
-    }
-
-    if (cursorToPersist !== lastProcessedId) {
-      await store.setLastProcessedItemId(cursorToPersist);
-      lastProcessedId = cursorToPersist;
     }
 
     prunedCount = await store.pruneRelayItemsLastSeenBefore(
