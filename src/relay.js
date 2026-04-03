@@ -6,7 +6,6 @@ import {
   extractHeadlineParts,
   extractTrailingSource,
   formatApiTime,
-  getDocUrl,
   getNumericItemId,
   getTagNames,
   isFocusItem,
@@ -69,23 +68,6 @@ function buildRelayMessage(item) {
   return truncateText(lines.join('\n'), 2000);
 }
 
-function buildHeadline(item) {
-  const originalText = typeof item?.rich_text === 'string' ? item.rich_text.trim() : '';
-  const headlineParts = extractHeadlineParts(originalText);
-  const sourceParts = extractTrailingSource(headlineParts.body || originalText);
-  const title = headlineParts.title.trim();
-  const body = sourceParts.body.trim();
-
-  return title || truncateText(body || originalText || `Item ${item?.id || ''}`, 120);
-}
-
-function buildSource(item) {
-  const originalText = typeof item?.rich_text === 'string' ? item.rich_text.trim() : '';
-  const headlineParts = extractHeadlineParts(originalText);
-  const sourceParts = extractTrailingSource(headlineParts.body || originalText);
-  return sourceParts.source.trim();
-}
-
 function createRunSummary({
   runId,
   startedAt,
@@ -138,21 +120,15 @@ function normalizeExistingMap(records) {
   return map;
 }
 
-async function buildPreparedItem(item, config) {
+async function buildPreparedItem(item) {
   const normalizedContent = normalizeContentText(typeof item?.rich_text === 'string' ? item.rich_text : '');
   const content = buildRelayMessage(item);
   const normalizedSourceFingerprint = await sha256Hex(normalizedContent || content);
 
   return {
     itemId: Number(item.id),
-    zhiboId: Number(item.zhibo_id || config.zhiboId),
     createTime: String(item.create_time || ''),
     updateTime: String(item.update_time || item.create_time || ''),
-    headline: buildHeadline(item),
-    source: buildSource(item),
-    tagNames: getTagNames(item).join(' / '),
-    docUrl: getDocUrl(item),
-    normalizedContent,
     content,
     normalizedSourceFingerprint
   };
@@ -161,22 +137,13 @@ async function buildPreparedItem(item, config) {
 function createRelayItemRecord(prepared, existingRecord, overrides = {}) {
   return {
     itemId: prepared.itemId,
-    zhiboId: prepared.zhiboId,
     createTime: prepared.createTime,
     updateTime: prepared.updateTime,
-    headline: prepared.headline,
-    source: prepared.source,
-    tagNames: prepared.tagNames,
-    docUrl: prepared.docUrl,
-    normalizedContent: prepared.normalizedContent,
     normalizedSourceFingerprint: prepared.normalizedSourceFingerprint,
     discordMessageId: String(
       overrides.discordMessageId ?? existingRecord?.discord_message_id ?? ''
     ),
-    lastContentHash: overrides.lastContentHash ?? String(existingRecord?.last_content_hash || prepared.normalizedSourceFingerprint),
     relayStatus: overrides.relayStatus ?? existingRecord?.relay_status ?? 'created',
-    duplicateOfItemId: overrides.duplicateOfItemId ?? existingRecord?.duplicate_of_item_id ?? null,
-    firstSeenAt: overrides.firstSeenAt ?? String(existingRecord?.first_seen_at || nowIsoString()),
     lastSeenAt: overrides.lastSeenAt ?? nowIsoString(),
     lastRelayedAt: overrides.lastRelayedAt ?? String(existingRecord?.last_relayed_at || nowIsoString())
   };
@@ -185,20 +152,11 @@ function createRelayItemRecord(prepared, existingRecord, overrides = {}) {
 function toStoredRelayRecord(record) {
   return {
     item_id: record.itemId,
-    zhibo_id: record.zhiboId,
     create_time: record.createTime,
     update_time: record.updateTime,
-    headline: record.headline,
-    source: record.source,
-    tag_names: record.tagNames,
-    doc_url: record.docUrl,
-    normalized_content: record.normalizedContent,
     normalized_source_fingerprint: record.normalizedSourceFingerprint,
     discord_message_id: record.discordMessageId,
-    last_content_hash: record.lastContentHash,
     relay_status: record.relayStatus,
-    duplicate_of_item_id: record.duplicateOfItemId,
-    first_seen_at: record.firstSeenAt,
     last_seen_at: record.lastSeenAt,
     last_relayed_at: record.lastRelayedAt
   };
@@ -215,8 +173,6 @@ async function relayNewItem(item, prepared, existingRecord, config, store) {
   const record = createRelayItemRecord(prepared, existingRecord, {
     discordMessageId: result.messageId,
     relayStatus: 'created',
-    duplicateOfItemId: null,
-    firstSeenAt: existingRecord?.first_seen_at || sentAt,
     lastSeenAt: sentAt,
     lastRelayedAt: sentAt
   });
@@ -238,8 +194,6 @@ async function relayUpdatedItem(item, prepared, existingRecord, config, store) {
   if (existingRecord.normalized_source_fingerprint === prepared.normalizedSourceFingerprint) {
     const record = createRelayItemRecord(prepared, existingRecord, {
       relayStatus: existingRecord.relay_status || 'created',
-      duplicateOfItemId: existingRecord.duplicate_of_item_id ?? null,
-      firstSeenAt: String(existingRecord.first_seen_at || seenAt),
       lastSeenAt: seenAt,
       lastRelayedAt: String(existingRecord.last_relayed_at || seenAt)
     });
@@ -261,8 +215,6 @@ async function relayUpdatedItem(item, prepared, existingRecord, config, store) {
   const record = createRelayItemRecord(prepared, existingRecord, {
     discordMessageId: result.messageId || String(existingRecord.discord_message_id),
     relayStatus: 'updated',
-    duplicateOfItemId: null,
-    firstSeenAt: String(existingRecord.first_seen_at || seenAt),
     lastSeenAt: seenAt,
     lastRelayedAt: seenAt
   });
@@ -386,7 +338,7 @@ export async function runRelaySync(env, config, { triggerType }) {
     const preparedEntries = await Promise.all(
       feedItems.map(async item => ({
         item,
-        prepared: await buildPreparedItem(item, config)
+        prepared: await buildPreparedItem(item)
       }))
     );
 

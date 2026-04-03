@@ -169,20 +169,11 @@ export function createRelayStore(db) {
         `
           SELECT
             item_id,
-            zhibo_id,
             create_time,
             update_time,
-            headline,
-            source,
-            tag_names,
-            doc_url,
-            normalized_content,
-            content_fingerprint AS normalized_source_fingerprint,
+            normalized_source_fingerprint,
             discord_message_id,
-            last_content_hash,
             relay_status,
-            duplicate_of_item_id,
-            first_seen_at,
             last_seen_at,
             last_relayed_at
           FROM relay_items
@@ -203,57 +194,30 @@ export function createRelayStore(db) {
       `
         INSERT INTO relay_items (
           item_id,
-          zhibo_id,
           create_time,
           update_time,
-          headline,
-          source,
-          tag_names,
-          doc_url,
-          normalized_content,
-          content_fingerprint,
+          normalized_source_fingerprint,
           discord_message_id,
-          last_content_hash,
           relay_status,
-          duplicate_of_item_id,
-          first_seen_at,
           last_seen_at,
           last_relayed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(item_id) DO UPDATE SET
-          zhibo_id = excluded.zhibo_id,
           create_time = excluded.create_time,
           update_time = excluded.update_time,
-          headline = excluded.headline,
-          source = excluded.source,
-          tag_names = excluded.tag_names,
-          doc_url = excluded.doc_url,
-          normalized_content = excluded.normalized_content,
-          content_fingerprint = excluded.content_fingerprint,
+          normalized_source_fingerprint = excluded.normalized_source_fingerprint,
           discord_message_id = excluded.discord_message_id,
-          last_content_hash = excluded.last_content_hash,
           relay_status = excluded.relay_status,
-          duplicate_of_item_id = excluded.duplicate_of_item_id,
-          first_seen_at = excluded.first_seen_at,
           last_seen_at = excluded.last_seen_at,
           last_relayed_at = excluded.last_relayed_at
       `,
       [
         record.itemId,
-        record.zhiboId,
         record.createTime,
         record.updateTime,
-        record.headline,
-        record.source,
-        record.tagNames,
-        record.docUrl,
-        record.normalizedContent,
         record.normalizedSourceFingerprint,
         record.discordMessageId,
-        record.lastContentHash,
         record.relayStatus,
-        record.duplicateOfItemId ?? null,
-        record.firstSeenAt,
         record.lastSeenAt,
         record.lastRelayedAt
       ]
@@ -283,12 +247,9 @@ export function createRelayStore(db) {
             item_id,
             create_time,
             update_time,
-            headline,
-            source,
             relay_status,
-            duplicate_of_item_id,
             discord_message_id,
-            content_fingerprint AS normalized_source_fingerprint,
+            normalized_source_fingerprint,
             last_seen_at,
             last_relayed_at
           FROM relay_items
