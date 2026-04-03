@@ -197,50 +197,6 @@ export function createRelayStore(db) {
     return results;
   }
 
-  async function getRelayRecordsByContentFingerprints(fingerprints) {
-    const values = [...new Set(fingerprints.map(value => String(value || '').trim()).filter(Boolean))];
-    if (values.length === 0) {
-      return [];
-    }
-
-    const results = [];
-    const fingerprintChunks = chunkArray(values, MAX_SQL_VARIABLES_PER_QUERY);
-
-    for (const chunk of fingerprintChunks) {
-      const placeholders = chunk.map(() => '?').join(', ');
-      const rows = await queryAll(
-        db,
-        `
-          SELECT
-            item_id,
-            zhibo_id,
-            create_time,
-            update_time,
-            headline,
-            source,
-            tag_names,
-            doc_url,
-            normalized_content,
-            content_fingerprint AS normalized_source_fingerprint,
-            discord_message_id,
-            last_content_hash,
-            relay_status,
-            duplicate_of_item_id,
-            first_seen_at,
-            last_seen_at,
-            last_relayed_at
-          FROM relay_items
-          WHERE content_fingerprint IN (${placeholders})
-        `,
-        chunk
-      );
-
-      results.push(...rows);
-    }
-
-    return results;
-  }
-
   async function upsertRelayItem(record) {
     await execute(
       db,
@@ -364,7 +320,6 @@ export function createRelayStore(db) {
     acquireRunLock,
     releaseRunLock,
     getRelayRecordsByItemIds,
-    getRelayRecordsByContentFingerprints,
     upsertRelayItem,
     pruneRelayItemsLastSeenBefore,
     getStatusSnapshot

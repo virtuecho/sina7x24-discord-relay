@@ -96,7 +96,6 @@ function createRunSummary({
   createdCount,
   updatedCount,
   skippedCount,
-  deduplicatedCount,
   prunedCount,
   latestSeenId,
   lastProcessedId,
@@ -118,8 +117,6 @@ function createRunSummary({
     updated_count: updatedCount,
     skippedCount,
     skipped_count: skippedCount,
-    deduplicatedCount,
-    deduplicated_count: deduplicatedCount,
     prunedCount,
     pruned_count: prunedCount,
     latestSeenId,
@@ -139,47 +136,6 @@ function normalizeExistingMap(records) {
     }
   });
   return map;
-}
-
-function shouldReplaceFingerprintRecord(current, candidate) {
-  const currentCanonical = current?.relay_status !== 'deduped';
-  const candidateCanonical = candidate?.relay_status !== 'deduped';
-
-  if (currentCanonical !== candidateCanonical) {
-    return candidateCanonical;
-  }
-
-  const currentSeenAt = String(current?.last_seen_at || current?.first_seen_at || '');
-  const candidateSeenAt = String(candidate?.last_seen_at || candidate?.first_seen_at || '');
-  return candidateSeenAt > currentSeenAt;
-}
-
-function normalizeFingerprintMap(records) {
-  const map = new Map();
-
-  records.forEach(record => {
-    const key = String(record?.normalized_source_fingerprint || '').trim();
-    if (!key) {
-      return;
-    }
-
-    const current = map.get(key);
-    if (!current || shouldReplaceFingerprintRecord(current, record)) {
-      map.set(key, record);
-    }
-  });
-
-  return map;
-}
-
-function getCanonicalItemId(record) {
-  const duplicateOfItemId = Number(record?.duplicate_of_item_id);
-  if (Number.isFinite(duplicateOfItemId)) {
-    return duplicateOfItemId;
-  }
-
-  const itemId = Number(record?.item_id);
-  return Number.isFinite(itemId) ? itemId : null;
 }
 
 async function buildPreparedItem(item, config) {
@@ -248,24 +204,6 @@ function toStoredRelayRecord(record) {
   };
 }
 
-function findDuplicateRecord(fingerprintMap, prepared) {
-  const record = fingerprintMap.get(prepared.normalizedSourceFingerprint);
-  if (!record) {
-    return null;
-  }
-
-  const itemId = Number(record?.item_id);
-  if (!Number.isFinite(itemId) || itemId === prepared.itemId) {
-    return null;
-  }
-
-  if (!record?.discord_message_id) {
-    return null;
-  }
-
-  return record;
-}
-
 async function relayNewItem(item, prepared, existingRecord, config, store) {
   const sentAt = nowIsoString();
   const result = await sendDiscordMessage({
@@ -287,25 +225,7 @@ async function relayNewItem(item, prepared, existingRecord, config, store) {
   return toStoredRelayRecord(record);
 }
 
-async function markItemAsDeduplicated(prepared, existingRecord, duplicateRecord, store) {
-  const seenAt = nowIsoString();
-  const canonicalItemId = getCanonicalItemId(duplicateRecord);
-  const record = createRelayItemRecord(prepared, existingRecord, {
-    discordMessageId: String(duplicateRecord.discord_message_id),
-    relayStatus: 'deduped',
-    duplicateOfItemId: canonicalItemId,
-    firstSeenAt: existingRecord?.first_seen_at || seenAt,
-    lastSeenAt: seenAt,
-    lastRelayedAt: String(
-      existingRecord?.last_relayed_at || duplicateRecord.last_relayed_at || seenAt
-    )
-  });
-
-  await store.upsertRelayItem(record);
-  return toStoredRelayRecord(record);
-}
-
-async function relayUpdatedItem(item, prepared, existingRecord, fingerprintMap, config, store) {
+async function relayUpdatedItem(item, prepared, existingRecord, config, store) {
   const seenAt = nowIsoString();
 
   if (!existingRecord?.discord_message_id) {
@@ -329,24 +249,6 @@ async function relayUpdatedItem(item, prepared, existingRecord, fingerprintMap, 
     return {
       action: 'skipped',
       record: toStoredRelayRecord(record)
-    };
-  }
-
-  if (existingRecord.relay_status === 'deduped') {
-    const duplicateRecord = findDuplicateRecord(fingerprintMap, prepared);
-
-    if (duplicateRecord) {
-      const record = await markItemAsDeduplicated(prepared, existingRecord, duplicateRecord, store);
-      return {
-        action: 'skipped',
-        record
-      };
-    }
-
-    const record = await relayNewItem(item, prepared, existingRecord, config, store);
-    return {
-      action: 'created',
-      record
     };
   }
 
@@ -390,7 +292,6 @@ function createLockedSummary({ runId, startedAt, finishedAt, triggerType, lastPr
     createdCount: 0,
     updatedCount: 0,
     skippedCount: 0,
-    deduplicatedCount: 0,
     prunedCount: 0,
     latestSeenId: null,
     lastProcessedId
@@ -426,7 +327,6 @@ export async function runRelaySync(env, config, { triggerType }) {
   let createdCount = 0;
   let updatedCount = 0;
   let skippedCount = 0;
-  let deduplicatedCount = 0;
   let prunedCount = 0;
   let latestSeenId = null;
   let lastProcessedId = null;
@@ -472,7 +372,6 @@ export async function runRelaySync(env, config, { triggerType }) {
         createdCount,
         updatedCount,
         skippedCount,
-        deduplicatedCount,
         prunedCount,
         latestSeenId,
         lastProcessedId: latestSeenId,
@@ -494,15 +393,14 @@ export async function runRelaySync(env, config, { triggerType }) {
     const existingRecords = await store.getRelayRecordsByItemIds(
       preparedEntries.map(entry => entry.prepared.itemId).filter(Number.isFinite)
     );
-    const fingerprintRecords = await store.getRelayRecordsByContentFingerprints(
-      preparedEntries.map(entry => entry.prepared.normalizedSourceFingerprint)
-    );
 
     const existingMap = normalizeExistingMap(existingRecords);
-    const fingerprintMap = normalizeFingerprintMap(fingerprintRecords);
 
     const newEntries = preparedEntries
-      .filter(entry => entry.prepared.itemId > lastProcessedId)
+      .filter(entry => {
+        const itemId = entry.prepared.itemId;
+        return itemId > lastProcessedId || !existingMap.has(itemId);
+      })
       .sort((left, right) => left.prepared.itemId - right.prepared.itemId);
 
     for (const entry of newEntries) {
@@ -514,16 +412,12 @@ export async function runRelaySync(env, config, { triggerType }) {
           item,
           prepared,
           existingRecord,
-          fingerprintMap,
           config,
           store
         );
 
         if (result?.record) {
           existingMap.set(prepared.itemId, result.record);
-          if (result.record.relay_status !== 'deduped') {
-            fingerprintMap.set(prepared.normalizedSourceFingerprint, result.record);
-          }
         }
 
         if (result?.action === 'created') {
@@ -538,19 +432,8 @@ export async function runRelaySync(env, config, { triggerType }) {
         continue;
       }
 
-      const duplicateRecord = findDuplicateRecord(fingerprintMap, prepared);
-
-      if (duplicateRecord) {
-        const record = await markItemAsDeduplicated(prepared, existingRecord, duplicateRecord, store);
-        existingMap.set(prepared.itemId, record);
-        deduplicatedCount += 1;
-        lastProcessedId = await advanceLastProcessedCursor(store, lastProcessedId, prepared.itemId);
-        continue;
-      }
-
       const record = await relayNewItem(item, prepared, existingRecord, config, store);
       existingMap.set(prepared.itemId, record);
-      fingerprintMap.set(prepared.normalizedSourceFingerprint, record);
       createdCount += 1;
       lastProcessedId = await advanceLastProcessedCursor(store, lastProcessedId, prepared.itemId);
     }
@@ -567,16 +450,12 @@ export async function runRelaySync(env, config, { triggerType }) {
         item,
         prepared,
         existingMap.get(itemId),
-        fingerprintMap,
         config,
         store
       );
 
       if (result?.record) {
         existingMap.set(itemId, result.record);
-        if (result.record.relay_status !== 'deduped') {
-          fingerprintMap.set(prepared.normalizedSourceFingerprint, result.record);
-        }
       }
 
       if (result?.action === 'created') {
@@ -603,7 +482,6 @@ export async function runRelaySync(env, config, { triggerType }) {
       createdCount,
       updatedCount,
       skippedCount,
-      deduplicatedCount,
       prunedCount,
       latestSeenId,
       lastProcessedId
@@ -623,7 +501,6 @@ export async function runRelaySync(env, config, { triggerType }) {
       createdCount,
       updatedCount,
       skippedCount,
-      deduplicatedCount,
       prunedCount,
       latestSeenId,
       lastProcessedId,
