@@ -1,5 +1,5 @@
 import { fetchWithTimeout, HttpError, isAbortError } from './http.js';
-import { randomInteger, sleep, sortFeedItemsByIdDesc } from './utils.js';
+import { randomInteger, sortFeedItemsByIdDesc } from './utils.js';
 
 const SINA_FEED_PATH = '/api/zhibo/feed';
 const FETCH_TIMEOUT_MS = 10000;
@@ -11,11 +11,6 @@ const BROWSER_USER_AGENTS = [
 
 function createCacheBustToken() {
   return `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
-}
-
-function choosePageSize(config) {
-  const jitter = Math.max(0, Number(config.pageSizeJitter || 0));
-  return Math.max(1, config.pageSize + randomInteger(0, jitter));
 }
 
 function chooseBrowserUserAgent() {
@@ -105,36 +100,11 @@ export async function fetchFeedPage(config, { page = 1, pageSize = config.pageSi
 }
 
 export async function fetchRecentFeedItems(config) {
-  const dedupedItems = new Map();
-  const pageSize = choosePageSize(config);
   const userAgent = chooseBrowserUserAgent();
-
-  for (let page = 1; page <= config.maxPagesPerRun; page += 1) {
-    const { items } = await fetchFeedPage(config, {
-      page,
-      pageSize,
-      userAgent
-    });
-
-    if (items.length === 0) {
-      break;
-    }
-
-    items.forEach(item => {
-      const key = String(item?.id ?? '');
-      if (key && !dedupedItems.has(key)) {
-        dedupedItems.set(key, item);
-      }
-    });
-
-    if (items.length < pageSize) {
-      break;
-    }
-
-    if (page < config.maxPagesPerRun && config.sinaRequestDelayMaxMs > 0) {
-      await sleep(randomInteger(150, Math.max(150, config.sinaRequestDelayMaxMs)));
-    }
-  }
-
-  return sortFeedItemsByIdDesc([...dedupedItems.values()]);
+  const { items } = await fetchFeedPage(config, {
+    page: 1,
+    pageSize: config.pageSize,
+    userAgent
+  });
+  return sortFeedItemsByIdDesc(items);
 }
