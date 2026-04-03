@@ -158,7 +158,7 @@ function normalizeFingerprintMap(records) {
   const map = new Map();
 
   records.forEach(record => {
-    const key = String(record?.content_fingerprint || '').trim();
+    const key = String(record?.normalized_source_fingerprint || '').trim();
     if (!key) {
       return;
     }
@@ -185,10 +185,7 @@ function getCanonicalItemId(record) {
 async function buildPreparedItem(item, config) {
   const normalizedContent = normalizeContentText(typeof item?.rich_text === 'string' ? item.rich_text : '');
   const content = buildRelayMessage(item);
-  const [contentHash, contentFingerprint] = await Promise.all([
-    sha256Hex(content),
-    sha256Hex(normalizedContent || content)
-  ]);
+  const normalizedSourceFingerprint = await sha256Hex(normalizedContent || content);
 
   return {
     itemId: Number(item.id),
@@ -201,8 +198,7 @@ async function buildPreparedItem(item, config) {
     docUrl: getDocUrl(item),
     normalizedContent,
     content,
-    contentHash,
-    contentFingerprint
+    normalizedSourceFingerprint
   };
 }
 
@@ -217,11 +213,11 @@ function createRelayItemRecord(prepared, existingRecord, overrides = {}) {
     tagNames: prepared.tagNames,
     docUrl: prepared.docUrl,
     normalizedContent: prepared.normalizedContent,
-    contentFingerprint: prepared.contentFingerprint,
+    normalizedSourceFingerprint: prepared.normalizedSourceFingerprint,
     discordMessageId: String(
       overrides.discordMessageId ?? existingRecord?.discord_message_id ?? ''
     ),
-    lastContentHash: overrides.lastContentHash ?? prepared.contentHash,
+    lastContentHash: overrides.lastContentHash ?? String(existingRecord?.last_content_hash || prepared.normalizedSourceFingerprint),
     relayStatus: overrides.relayStatus ?? existingRecord?.relay_status ?? 'created',
     duplicateOfItemId: overrides.duplicateOfItemId ?? existingRecord?.duplicate_of_item_id ?? null,
     firstSeenAt: overrides.firstSeenAt ?? String(existingRecord?.first_seen_at || nowIsoString()),
@@ -241,7 +237,7 @@ function toStoredRelayRecord(record) {
     tag_names: record.tagNames,
     doc_url: record.docUrl,
     normalized_content: record.normalizedContent,
-    content_fingerprint: record.contentFingerprint,
+    normalized_source_fingerprint: record.normalizedSourceFingerprint,
     discord_message_id: record.discordMessageId,
     last_content_hash: record.lastContentHash,
     relay_status: record.relayStatus,
@@ -253,7 +249,7 @@ function toStoredRelayRecord(record) {
 }
 
 function findDuplicateRecord(fingerprintMap, prepared) {
-  const record = fingerprintMap.get(prepared.contentFingerprint);
+  const record = fingerprintMap.get(prepared.normalizedSourceFingerprint);
   if (!record) {
     return null;
   }
@@ -319,7 +315,7 @@ async function relayUpdatedItem(item, prepared, existingRecord, fingerprintMap, 
     };
   }
 
-  if (existingRecord.last_content_hash === prepared.contentHash) {
+  if (existingRecord.normalized_source_fingerprint === prepared.normalizedSourceFingerprint) {
     const record = createRelayItemRecord(prepared, existingRecord, {
       relayStatus: existingRecord.relay_status || 'created',
       duplicateOfItemId: existingRecord.duplicate_of_item_id ?? null,
@@ -499,7 +495,7 @@ export async function runRelaySync(env, config, { triggerType }) {
       preparedEntries.map(entry => entry.prepared.itemId).filter(Number.isFinite)
     );
     const fingerprintRecords = await store.getRelayRecordsByContentFingerprints(
-      preparedEntries.map(entry => entry.prepared.contentFingerprint)
+      preparedEntries.map(entry => entry.prepared.normalizedSourceFingerprint)
     );
 
     const existingMap = normalizeExistingMap(existingRecords);
@@ -526,7 +522,7 @@ export async function runRelaySync(env, config, { triggerType }) {
         if (result?.record) {
           existingMap.set(prepared.itemId, result.record);
           if (result.record.relay_status !== 'deduped') {
-            fingerprintMap.set(prepared.contentFingerprint, result.record);
+            fingerprintMap.set(prepared.normalizedSourceFingerprint, result.record);
           }
         }
 
@@ -554,7 +550,7 @@ export async function runRelaySync(env, config, { triggerType }) {
 
       const record = await relayNewItem(item, prepared, existingRecord, config, store);
       existingMap.set(prepared.itemId, record);
-      fingerprintMap.set(prepared.contentFingerprint, record);
+      fingerprintMap.set(prepared.normalizedSourceFingerprint, record);
       createdCount += 1;
       lastProcessedId = await advanceLastProcessedCursor(store, lastProcessedId, prepared.itemId);
     }
@@ -579,7 +575,7 @@ export async function runRelaySync(env, config, { triggerType }) {
       if (result?.record) {
         existingMap.set(itemId, result.record);
         if (result.record.relay_status !== 'deduped') {
-          fingerprintMap.set(prepared.contentFingerprint, result.record);
+          fingerprintMap.set(prepared.normalizedSourceFingerprint, result.record);
         }
       }
 
