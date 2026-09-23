@@ -18,7 +18,7 @@ It is the extraction of the browser-side Discord auto-relay from the main `sina7
 - Prevent overlapping runs with a D1-backed run lock
 - Prune relay memory that has not been seen again for 7 days
 - Expose admin endpoints for status inspection and manual runs
-- Seed the relay cursor on first run instead of flooding Discord with backlog history
+- Seed the current page IDs and relay cursor on first run instead of flooding Discord with backlog history on later polls
 
 ## Project Structure
 
@@ -129,7 +129,7 @@ Use `Authorization: Bearer <ADMIN_API_TOKEN>` for admin endpoints unless you int
 
 ## First Run Behavior
 
-The first successful relay run records the newest feed item ID as the cursor and does not backfill old messages to Discord. That keeps a fresh deployment from flooding the channel with history.
+The first successful relay run stores the current page IDs as skipped `seeded` relay-memory rows, then stores the newest feed item ID as the cursor. This keeps the next poll from mistaking missing relay records for new backlog items. On an upgrade with a cursor but no feed snapshot, missing IDs at or below the cursor are seeded as skipped too. Seed rows are omitted from the status list.
 
 The Worker stores only the latest run summary plus relay memory that is useful for deduplication. Cleanup still runs automatically, but it deletes records that have not been seen again for 7 days, rather than rows that were merely not re-relayed for 7 days.
 

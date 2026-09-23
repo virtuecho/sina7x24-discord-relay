@@ -79,7 +79,7 @@ Only `last_seen_at` is used for indexed ordering and retention queries. `last_re
 The current relay rules are:
 
 - fetch the latest Sina feed page once per run
-- on the very first successful run, seed the cursor to the latest item and skip backlog delivery
+- on the very first successful run, store the current page's IDs as `seeded` relay-memory rows, then seed the cursor; on an upgrade with a cursor but no snapshot, seed missing IDs at or below that cursor too
 - acquire a D1-backed run lock so overlapping cron/manual executions cannot relay the same fresh item twice
 - create Discord messages for items newer than the stored cursor
 - process each new candidate once per run, so it is not immediately checked and persisted again as an existing item

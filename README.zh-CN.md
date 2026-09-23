@@ -19,7 +19,7 @@ Sina 7x24 Discord Relay 是一个独立的 Cloudflare Worker，用来轮询新�
 - 用 D1 状态锁防止任务重叠执行
 - 自动删除连续 7 天都没再见过的 `relay_items` 记录
 - 提供状态查看和手动执行的管理接口
-- 首次运行只种下游标，不会把历史消息整批灌入 Discord
+- 首次运行同时记录当前页 ID 和游标，避免下一轮把未转发的历史消息误判为新消息
 
 ## 项目结构
 
@@ -134,7 +134,7 @@ npx wrangler secret put ADMIN_API_TOKEN
 
 ## 首次运行行为
 
-第一次成功执行 relay 时，系统只会记录当前最新新闻 ID 作为游标，不会把更早的历史消息批量发到 Discord，避免新部署时刷屏。
+第一次成功执行 relay 时，系统会把当前页 ID 标记为 `seeded`（仅用于去重，不显示在状态列表），再记录最新新闻 ID 作为游标。这样下一轮不会因为这些 ID 缺少 relay 记录而把历史消息误判为新消息并补发。升级时如果已有游标但没有活动页快照，也会把游标以内缺少记录的 ID 标记为跳过。
 
 Worker 只保留最新一次运行摘要，以及最近见过的 item 级 relay 记忆。更新判定只看同一 `item_id` 的 `normalized_source_fingerprint` 是否变化；不同 `item_id` 即使原文相同，也会被视为独立消息。
 

@@ -149,6 +149,24 @@ function createRelayItemRecord(prepared, existingRecord, overrides = {}) {
   };
 }
 
+function createSeedRelayItemRecord(item, seenAt) {
+  const itemId = getNumericItemId(item);
+  if (itemId == null) {
+    return null;
+  }
+
+  return {
+    itemId,
+    createTime: String(item.create_time || ''),
+    updateTime: String(item.update_time || item.create_time || ''),
+    normalizedSourceFingerprint: '',
+    discordMessageId: '',
+    relayStatus: 'seeded',
+    lastSeenAt: seenAt,
+    lastRelayedAt: ''
+  };
+}
+
 function toStoredRelayRecord(record) {
   return {
     item_id: record.itemId,
@@ -327,6 +345,9 @@ export async function runRelaySync(env, config, { triggerType }) {
 
     if (lastProcessedId == null) {
       if (latestSeenId != null) {
+        await store.seedRelayItems(feedItems
+          .map(item => createSeedRelayItemRecord(item, observation.snapshot.seenAt))
+          .filter(Boolean));
         await store.setLastProcessedItemId(latestSeenId);
       }
 
@@ -363,6 +384,20 @@ export async function runRelaySync(env, config, { triggerType }) {
     );
 
     const existingMap = normalizeExistingMap(existingRecords);
+    if (!observation.previousSnapshot?.seedComplete) {
+      const missingCursorItems = preparedEntries.filter(entry =>
+        entry.prepared.itemId <= lastProcessedId
+        && !existingMap.has(entry.prepared.itemId)
+      );
+      const seededRecords = missingCursorItems
+        .map(({ item }) => createSeedRelayItemRecord(item, observation.snapshot.seenAt))
+        .filter(Boolean);
+
+      await store.seedRelayItems(seededRecords);
+      seededRecords.forEach(record => {
+        existingMap.set(record.itemId, toStoredRelayRecord(record));
+      });
+    }
 
     const newEntries = preparedEntries
       .filter(entry => {

@@ -90,7 +90,8 @@ export function createRelayStore(db) {
       latestSeenId: snapshot.latestSeenId != null
         && Number.isFinite(Number(snapshot.latestSeenId))
         ? Number(snapshot.latestSeenId)
-        : null
+        : null,
+      seedComplete: snapshot.seedComplete === true
     };
   }
 
@@ -106,7 +107,8 @@ export function createRelayStore(db) {
     const snapshot = {
       itemIds: currentItemIds,
       seenAt,
-      latestSeenId: effectiveLatestSeenId
+      latestSeenId: effectiveLatestSeenId,
+      seedComplete: previousSnapshot?.seedComplete === true
     };
     const statements = [];
 
@@ -288,6 +290,49 @@ export function createRelayStore(db) {
     );
   }
 
+  async function seedRelayItems(records) {
+    const activeFeedSnapshot = await getActiveFeedSnapshot();
+    const statements = records.map(record => db.prepare(`
+      INSERT INTO relay_items (
+        item_id,
+        create_time,
+        update_time,
+        normalized_source_fingerprint,
+        discord_message_id,
+        relay_status,
+        last_seen_at,
+        last_relayed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(item_id) DO NOTHING
+    `).bind(
+      record.itemId,
+      record.createTime,
+      record.updateTime,
+      record.normalizedSourceFingerprint,
+      record.discordMessageId,
+      record.relayStatus,
+      record.lastSeenAt,
+      record.lastRelayedAt
+    ));
+
+    if (activeFeedSnapshot && !activeFeedSnapshot.seedComplete) {
+      activeFeedSnapshot.seedComplete = true;
+      statements.push(db.prepare(`
+        UPDATE relay_state
+        SET value = ?, updated_at = ?
+        WHERE key = ?
+      `).bind(
+        JSON.stringify(activeFeedSnapshot),
+        activeFeedSnapshot.seenAt,
+        ACTIVE_FEED_SNAPSHOT_KEY
+      ));
+    }
+
+    if (statements.length > 0) {
+      await db.batch(statements);
+    }
+  }
+
   async function pruneRelayItemsLastSeenBefore(cutoffIsoString, activeItemIds = []) {
     const result = await execute(
       db,
@@ -324,6 +369,7 @@ export function createRelayStore(db) {
             last_seen_at,
             last_relayed_at
           FROM relay_items
+          WHERE relay_status != 'seeded'
           ORDER BY last_seen_at DESC
           LIMIT 20
         `
@@ -338,7 +384,9 @@ export function createRelayStore(db) {
     );
 
     for (const record of activeRecords) {
-      recentItemsById.set(Number(record.item_id), record);
+      if (record.relay_status !== 'seeded') {
+        recentItemsById.set(Number(record.item_id), record);
+      }
     }
 
     const recentItems = [...recentItemsById.values()]
@@ -374,6 +422,7 @@ export function createRelayStore(db) {
     releaseRunLock,
     getRelayRecordsByItemIds,
     upsertRelayItem,
+    seedRelayItems,
     pruneRelayItemsLastSeenBefore,
     getStatusSnapshot
   };
