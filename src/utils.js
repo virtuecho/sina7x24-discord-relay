@@ -95,18 +95,6 @@ export function extractTrailingSource(text) {
   };
 }
 
-export function getDocUrl(item) {
-  const rawDocUrl = typeof item?.docurl === 'string' ? item.docurl.trim() : '';
-  if (!rawDocUrl) {
-    return '';
-  }
-
-  return rawDocUrl
-    .replace('//finance.sina.cn', '//finance.sina.com.cn')
-    .replace('/detail-', '/doc-')
-    .replace('.d.html', '.shtml');
-}
-
 export function getTagNames(item) {
   if (!Array.isArray(item?.tag)) {
     return [];
@@ -183,8 +171,4 @@ export function randomInteger(min, max) {
   }
 
   return lower + Math.floor(Math.random() * (upper - lower + 1));
-}
-
-export function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, Math.max(0, ms)));
 }
