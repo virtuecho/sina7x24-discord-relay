@@ -194,15 +194,27 @@ async function relayUpdatedItem(item, prepared, existingRecord, config, store) {
   if (existingRecord.normalized_source_fingerprint === prepared.normalizedSourceFingerprint) {
     const record = createRelayItemRecord(prepared, existingRecord, {
       relayStatus: existingRecord.relay_status || 'created',
-      lastSeenAt: seenAt,
+      lastSeenAt: existingRecord.last_seen_at,
       lastRelayedAt: String(existingRecord.last_relayed_at || seenAt)
     });
 
-    await store.upsertRelayItem(record);
+    const storedRecord = toStoredRelayRecord(record);
+    const changedFields = [
+      'create_time',
+      'update_time',
+      'normalized_source_fingerprint',
+      'discord_message_id',
+      'relay_status',
+      'last_relayed_at'
+    ];
+
+    if (changedFields.some(field => storedRecord[field] !== existingRecord[field])) {
+      await store.upsertRelayItem(record);
+    }
 
     return {
       action: 'skipped',
-      record: toStoredRelayRecord(record)
+      record: storedRecord
     };
   }
 
@@ -302,10 +314,14 @@ export async function runRelaySync(env, config, { triggerType }) {
     const feedItems = await fetchRecentFeedItems(config);
     fetchedCount = feedItems.length;
     latestSeenId = feedItems.length > 0 ? getNumericItemId(feedItems[0]) : null;
-
-    if (latestSeenId != null) {
-      await store.setLastSeenFeedItemId(latestSeenId);
-    }
+    const pageItemIds = feedItems
+      .map(getNumericItemId)
+      .filter(Number.isFinite);
+    const observation = await store.recordFeedPageObservation({
+      itemIds: pageItemIds,
+      seenAt: nowIsoString(),
+      latestSeenId
+    });
 
     lastProcessedId = await store.getLastProcessedItemId();
 
@@ -420,7 +436,8 @@ export async function runRelaySync(env, config, { triggerType }) {
     }
 
     prunedCount = await store.pruneRelayItemsLastSeenBefore(
-      createRetentionCutoffIso(config.relayItemRetentionDays)
+      createRetentionCutoffIso(config.relayItemRetentionDays),
+      observation.snapshot.itemIds
     );
 
     const outcome = fetchedCount === 0 ? 'empty' : 'ok';

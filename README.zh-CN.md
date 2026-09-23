@@ -14,6 +14,7 @@ Sina 7x24 Discord Relay 是一个独立的 Cloudflare Worker，用来轮询新�
 - 通过 Secret 管理的 Discord Webhook 发送新消息
 - 当同一条新闻的规范化原文发生变化时，更新已有的 Discord 消息
 - 用 D1 持久化 relay 游标、最新一次运行摘要，以及最近见过的 item 级 relay 记忆
+- 用一条 D1 活动页快照记录当前页和观测时间，避免每分钟逐条刷新当前页所有记录
 - 用 D1 状态锁防止任务重叠执行
 - 自动删除连续 7 天都没再见过的 `relay_items` 记录
 - 提供状态查看和手动执行的管理接口

@@ -68,7 +68,7 @@ sequenceDiagram
 The Worker uses two data shapes in D1:
 
 - `relay_state`
-  Key-value state such as the last processed Sina item ID, the latest run summary, and the active run lock.
+  Key-value state such as the last processed Sina item ID, the active feed-page snapshot, the latest run summary, and the active run lock.
 - `relay_items`
   Relay memory keyed by Sina `item_id`, including the Discord message mapping, normalized source fingerprint, and seen/relayed timestamps.
 
@@ -82,10 +82,13 @@ The current relay rules are:
 - create Discord messages for items newer than the stored cursor
 - treat each Sina `item_id` as an independent relay target
 - patch previously relayed Discord messages only when the same item's normalized source fingerprint changes
-- keep relay memory fresh by updating `last_seen_at` even when no Discord write is needed
+- record the current feed page and its observation time in one `relay_state` snapshot; do not update every active item's row on every poll
+- when an item leaves the page, persist the prior snapshot time to its `last_seen_at`; the status endpoint overlays the current snapshot time for active items
 - persist the highest successfully relayed item ID as the new cursor
 - keep only one latest run summary in `relay_state`
 - delete `relay_items` rows that have not been seen again for 7 days
+
+The active-page snapshot preserves the last-seen and retention behavior while reducing steady-state D1 writes. With a stable 30-item page, the old per-item refresh wrote 30 `relay_items` rows and their 30 `last_seen_at` index entries per run. The snapshot writes one `relay_state` row instead, a 98.3% reduction for this maintenance path. Items leaving the page still incur a one-time update. New relays, content edits, run summaries, and lock operations are additional writes and are not included in that estimate.
 
 ## Public And Admin Surface
 

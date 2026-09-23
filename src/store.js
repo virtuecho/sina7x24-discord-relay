@@ -1,5 +1,6 @@
 const LAST_PROCESSED_ITEM_ID_KEY = 'last_processed_item_id';
 const LAST_SEEN_FEED_ITEM_ID_KEY = 'last_seen_feed_item_id';
+const ACTIVE_FEED_SNAPSHOT_KEY = 'active_feed_snapshot';
 const LAST_RUN_SUMMARY_KEY = 'last_run_summary';
 const ACTIVE_RUN_LOCK_KEY = 'active_run_lock';
 const MAX_SQL_VARIABLES_PER_QUERY = 100;
@@ -75,6 +76,69 @@ export function createRelayStore(db) {
     } catch (_error) {
       return null;
     }
+  }
+
+  async function getActiveFeedSnapshot() {
+    const snapshot = await getJsonState(ACTIVE_FEED_SNAPSHOT_KEY);
+    if (!Array.isArray(snapshot?.itemIds) || typeof snapshot.seenAt !== 'string') {
+      return null;
+    }
+
+    return {
+      itemIds: [...new Set(snapshot.itemIds.map(Number).filter(Number.isFinite))],
+      seenAt: snapshot.seenAt,
+      latestSeenId: snapshot.latestSeenId != null
+        && Number.isFinite(Number(snapshot.latestSeenId))
+        ? Number(snapshot.latestSeenId)
+        : null
+    };
+  }
+
+  async function recordFeedPageObservation({ itemIds, seenAt, latestSeenId }) {
+    const previousSnapshot = await getActiveFeedSnapshot();
+    const currentItemIds = [...new Set(itemIds.map(Number).filter(Number.isFinite))];
+    const currentItemIdSet = new Set(currentItemIds);
+    const departedItemIds = (previousSnapshot?.itemIds || [])
+      .filter(itemId => !currentItemIdSet.has(itemId));
+    const effectiveLatestSeenId = latestSeenId
+      ?? previousSnapshot?.latestSeenId
+      ?? await getLastSeenFeedItemId();
+    const snapshot = {
+      itemIds: currentItemIds,
+      seenAt,
+      latestSeenId: effectiveLatestSeenId
+    };
+    const statements = [];
+
+    if (departedItemIds.length > 0) {
+      statements.push(
+        db.prepare(`
+          UPDATE relay_items
+          SET last_seen_at = ?
+          WHERE last_seen_at < ?
+            AND item_id IN (
+              SELECT CAST(value AS INTEGER) FROM json_each(?)
+            )
+        `).bind(
+          previousSnapshot.seenAt,
+          previousSnapshot.seenAt,
+          JSON.stringify(departedItemIds)
+        )
+      );
+    }
+
+    statements.push(
+      db.prepare(`
+        INSERT INTO relay_state (key, value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET
+          value = excluded.value,
+          updated_at = excluded.updated_at
+      `).bind(ACTIVE_FEED_SNAPSHOT_KEY, JSON.stringify(snapshot), seenAt)
+    );
+
+    await db.batch(statements);
+    return { previousSnapshot, snapshot };
   }
 
   async function setJsonState(key, value) {
@@ -224,20 +288,27 @@ export function createRelayStore(db) {
     );
   }
 
-  async function pruneRelayItemsLastSeenBefore(cutoffIsoString) {
+  async function pruneRelayItemsLastSeenBefore(cutoffIsoString, activeItemIds = []) {
     const result = await execute(
       db,
-      'DELETE FROM relay_items WHERE last_seen_at < ?',
-      [cutoffIsoString]
+      `
+        DELETE FROM relay_items
+        WHERE last_seen_at < ?
+          AND item_id NOT IN (
+            SELECT CAST(value AS INTEGER) FROM json_each(?)
+          )
+      `,
+      [cutoffIsoString, JSON.stringify(activeItemIds)]
     );
 
     return getAffectedRows(result);
   }
 
   async function getStatusSnapshot() {
-    const [lastProcessedItemId, lastSeenFeedItemId, lastRun, activeLock, recentItems] = await Promise.all([
+    const [lastProcessedItemId, lastSeenFeedItemId, activeFeedSnapshot, lastRun, activeLock, recentRows] = await Promise.all([
       getLastProcessedItemId(),
       getLastSeenFeedItemId(),
+      getActiveFeedSnapshot(),
       getLastRunSummary(),
       getActiveRunLock(),
       queryAll(
@@ -258,11 +329,31 @@ export function createRelayStore(db) {
         `
       )
     ]);
+    const activeRecords = activeFeedSnapshot?.itemIds.length
+      ? await getRelayRecordsByItemIds(activeFeedSnapshot.itemIds)
+      : [];
+    const activeItemIds = new Set(activeFeedSnapshot?.itemIds || []);
+    const recentItemsById = new Map(
+      recentRows.map(record => [Number(record.item_id), record])
+    );
+
+    for (const record of activeRecords) {
+      recentItemsById.set(Number(record.item_id), record);
+    }
+
+    const recentItems = [...recentItemsById.values()]
+      .map(record => activeItemIds.has(Number(record.item_id))
+        && activeFeedSnapshot.seenAt > record.last_seen_at
+        ? { ...record, last_seen_at: activeFeedSnapshot.seenAt }
+        : record)
+      .sort((left, right) => right.last_seen_at.localeCompare(left.last_seen_at)
+        || Number(right.item_id) - Number(left.item_id))
+      .slice(0, 20);
 
     return {
       cursor: {
         lastProcessedItemId,
-        lastSeenFeedItemId
+        lastSeenFeedItemId: activeFeedSnapshot?.latestSeenId ?? lastSeenFeedItemId
       },
       activeLock,
       lastRun,
@@ -277,6 +368,7 @@ export function createRelayStore(db) {
     setLastSeenFeedItemId,
     getLastRunSummary,
     setLastRunSummary,
+    recordFeedPageObservation,
     getActiveRunLock,
     acquireRunLock,
     releaseRunLock,
