@@ -19,6 +19,3 @@ CREATE TABLE IF NOT EXISTS relay_items (
 
 CREATE INDEX IF NOT EXISTS idx_relay_items_last_seen_at
   ON relay_items(last_seen_at DESC);
-
-CREATE INDEX IF NOT EXISTS idx_relay_items_last_relayed_at
-  ON relay_items(last_relayed_at DESC);

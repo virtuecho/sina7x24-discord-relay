@@ -72,6 +72,8 @@ The Worker uses two data shapes in D1:
 - `relay_items`
   Relay memory keyed by Sina `item_id`, including the Discord message mapping, normalized source fingerprint, and seen/relayed timestamps.
 
+Only `last_seen_at` is used for indexed ordering and retention queries. `last_relayed_at` remains part of the status data, but is not queried; its index is omitted from fresh schemas and removed from existing schemas by migration `0005`. This also avoids maintaining that index when a relay row is inserted or its relay timestamp changes.
+
 ## Relay Rules
 
 The current relay rules are:

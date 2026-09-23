@@ -30,8 +30,9 @@ It is the extraction of the browser-side Discord auto-relay from the main `sina7
 - `src/store.js` — D1 persistence for cursor, run lock, and relayed-item memory
 - `src/relay.js` — end-to-end relay orchestration
 - `migrations/0001_initial.sql` — initial D1 schema for fresh installs
-- `migrations/0002_compact_relay_state.sql` — upgrade migration for existing deployments
 - `migrations/0003_restore_relay_memory.sql` — upgrade migration from the compact schema to the richer relay memory schema
+- `migrations/0004_minimal_single_page_schema.sql` — upgrade migration to the current minimal relay schema
+- `migrations/0005_drop_unused_last_relayed_index.sql` — remove an index that no current query uses
 - `wrangler.jsonc` — Wrangler configuration template
 - `ARCHITECTURE.md` — system design and data-flow notes
 
@@ -82,18 +83,15 @@ Apply the same schema remotely:
 npx wrangler d1 execute sina7x24-discord-relay --remote --file=./migrations/0001_initial.sql
 ```
 
-If you are upgrading an existing deployment that already uses the compact schema introduced after `afd9e3b`, run:
+For an existing deployment, apply the migrations needed to reach its current schema, in order, before deploying code that expects the new schema. A deployment already on migration `0004` only needs the final index cleanup:
 
 ```bash
-npx wrangler d1 execute sina7x24-discord-relay --remote --file=./migrations/0003_restore_relay_memory.sql
+npx wrangler d1 execute sina7x24-discord-relay --remote --file=./migrations/0005_drop_unused_last_relayed_index.sql
 ```
 
-If you are upgrading from the very first pre-compact schema, run both upgrade migrations in order:
+From the compact schema, run `0003_restore_relay_memory.sql`, then `0004_minimal_single_page_schema.sql`, then `0005_drop_unused_last_relayed_index.sql`. From the richer relay-memory schema, start at `0004` and then run `0005`. Older schemas must first be upgraded to the richer relay-memory schema; those retired conversion scripts are no longer included here.
 
-```bash
-npx wrangler d1 execute sina7x24-discord-relay --remote --file=./migrations/0002_compact_relay_state.sql
-npx wrangler d1 execute sina7x24-discord-relay --remote --file=./migrations/0003_restore_relay_memory.sql
-```
+Fresh databases initialized from `0001_initial.sql` already omit the unused index and do not need `0005`.
 
 ## Secrets And Vars
 

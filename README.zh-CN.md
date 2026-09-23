@@ -33,6 +33,7 @@ Sina 7x24 Discord Relay 是一个独立的 Cloudflare Worker，用来轮询新�
 - `migrations/0001_initial.sql` — 全新部署的初始 D1 Schema
 - `migrations/0003_restore_relay_memory.sql` — 历史上的 relay 记忆 schema 迁移脚本
 - `migrations/0004_minimal_single_page_schema.sql` — 升级到单页轮询与最小 relay schema 的迁移脚本
+- `migrations/0005_drop_unused_last_relayed_index.sql` — 删除当前查询不使用的索引
 - `wrangler.jsonc` — Wrangler 配置模板
 - `ARCHITECTURE.md` — 系统设计与数据流说明
 
@@ -90,6 +91,16 @@ npx wrangler d1 execute sina7x24-discord-relay --remote --file=./migrations/0004
 ```
 
 这份 migration 会重建 `relay_items`，删除旧的去重字段和内容快照字段，并丢弃历史上的 `deduped` 记录。因为当前线上代码仍依赖旧 schema，所以请在准备发布新代码时再执行，不要提前单独运行。
+
+如果数据库已经是 `0004` 对应的 schema，在部署当前代码前再执行一次索引清理：
+
+```bash
+npx wrangler d1 execute sina7x24-discord-relay --remote --file=./migrations/0005_drop_unused_last_relayed_index.sql
+```
+
+如果仍处于更早的 schema，先按顺序执行升级所需的 migration，再执行 `0005`。全新数据库由 `0001_initial.sql` 初始化时已经不创建这个无用索引，因此不需要执行 `0005`。
+
+如果数据库早于 relay-memory schema，需先完成对应的历史 schema 转换；这些已废弃的转换脚本不再包含在当前仓库中。
 
 ## Secrets 与 Vars
 
