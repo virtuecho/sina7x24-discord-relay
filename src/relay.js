@@ -370,6 +370,7 @@ export async function runRelaySync(env, config, { triggerType }) {
         return itemId > lastProcessedId || !existingMap.has(itemId);
       })
       .sort((left, right) => left.prepared.itemId - right.prepared.itemId);
+    const processedNewItemIds = new Set();
 
     for (const entry of newEntries) {
       const { item, prepared } = entry;
@@ -396,6 +397,7 @@ export async function runRelaySync(env, config, { triggerType }) {
           skippedCount += 1;
         }
 
+        processedNewItemIds.add(prepared.itemId);
         lastProcessedId = await advanceLastProcessedCursor(store, lastProcessedId, prepared.itemId);
         continue;
       }
@@ -403,12 +405,15 @@ export async function runRelaySync(env, config, { triggerType }) {
       const record = await relayNewItem(item, prepared, existingRecord, config, store);
       existingMap.set(prepared.itemId, record);
       createdCount += 1;
+      processedNewItemIds.add(prepared.itemId);
       lastProcessedId = await advanceLastProcessedCursor(store, lastProcessedId, prepared.itemId);
     }
 
     const existingEntries = preparedEntries.filter(entry => {
       const itemId = entry.prepared.itemId;
-      return itemId <= lastProcessedId && existingMap.has(itemId);
+      return itemId <= lastProcessedId
+        && existingMap.has(itemId)
+        && !processedNewItemIds.has(itemId);
     });
 
     for (const entry of existingEntries) {

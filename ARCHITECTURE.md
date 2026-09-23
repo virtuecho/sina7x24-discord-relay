@@ -80,6 +80,7 @@ The current relay rules are:
 - on the very first successful run, seed the cursor to the latest item and skip backlog delivery
 - acquire a D1-backed run lock so overlapping cron/manual executions cannot relay the same fresh item twice
 - create Discord messages for items newer than the stored cursor
+- process each new candidate once per run, so it is not immediately checked and persisted again as an existing item
 - treat each Sina `item_id` as an independent relay target
 - patch previously relayed Discord messages only when the same item's normalized source fingerprint changes
 - record the current feed page and its observation time in one `relay_state` snapshot; do not update every active item's row on every poll

@@ -12,6 +12,7 @@ It is the extraction of the browser-side Discord auto-relay from the main `sina7
 - Add light jitter and browser-like request headers so polling does not look perfectly mechanical
 - Send new feed items to Discord through a secret-managed webhook
 - Update existing Discord messages when an already-relayed feed item changes
+- Process each newly handled feed item once per poll
 - Persist relay cursor, one latest run summary, and relay memory needed for item-level and content-level deduplication in D1
 - Track the current feed page with one D1 snapshot instead of refreshing every visible item's `last_seen_at` each minute
 - Prevent overlapping runs with a D1-backed run lock
